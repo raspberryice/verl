@@ -317,7 +317,9 @@ class TaskRunner:
         from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
-        tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        custom_chat_template = config.actor_rollout_ref.model.get('custom_chat_template', None)
+        
+        tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code, custom_chat_template=custom_chat_template)
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 

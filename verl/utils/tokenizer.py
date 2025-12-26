@@ -14,6 +14,8 @@
 """Utils for tokenization."""
 
 import warnings
+from pathlib import Path 
+import os 
 
 __all__ = ["hf_tokenizer", "hf_processor"]
 
@@ -33,7 +35,7 @@ def set_pad_token_id(tokenizer):
         warnings.warn(f"tokenizer.pad_token is None. Now set to {tokenizer.eos_token}", stacklevel=1)
 
 
-def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kwargs):
+def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True,custom_chat_template=None, **kwargs):
     """Create a huggingface pretrained tokenizer which correctness handles eos and pad tokens.
 
     Args:
@@ -41,6 +43,7 @@ def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kw
         name (str): The name of the tokenizer.
         correct_pad_token (bool): Whether to correct the pad token id.
         correct_gemma2 (bool): Whether to correct the gemma2 tokenizer.
+        custom_chat_template (str | None): override chat template
 
     Returns:
 
@@ -60,6 +63,13 @@ def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kw
     tokenizer = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
     if correct_pad_token:
         set_pad_token_id(tokenizer)
+        
+    if custom_chat_template is not None:
+        if os.path.splitext(custom_chat_template)[-1] == ".jinja":
+            # read template from file 
+            tokenizer.chat_template = Path(custom_chat_template).read_text() 
+        else:
+            tokenizer.chat_template = custom_chat_template
     return tokenizer
 
 
