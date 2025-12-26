@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from verl.base_config import BaseConfig
 
-__all__ = ["AlgoConfig", "FilterGroupsConfig", "KLControlConfig", "RolloutCorrectionConfig"]
+__all__ = ["AlgoConfig", "FilterGroupsConfig", "KLControlConfig", "OPDConfig", "RolloutCorrectionConfig"]
 
 
 @dataclass
@@ -54,6 +54,79 @@ class FilterGroupsConfig(BaseConfig):
     enable: bool = False
     metric: Optional[str] = None
     max_num_gen_batches: int = 0
+
+
+@dataclass
+class OPDConfig(BaseConfig):
+    """Configuration for On-Policy Distillation (OPD).
+
+    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
+
+    OPD applies selective knowledge distillation from a teacher model to improve performance on
+    difficult problems while avoiding length inflation on easy problems. It uses:
+    1. Per-prompt pass rate gating: Only apply OPD to prompts with low pass rates
+    2. Per-sample failure gating: Within underperforming prompts, only distill failed rollouts
+    3. Horizon masking: Limit KD to thinking tokens (stop before answer to prevent style drift)
+
+    The KL divergence is computed with student policy as p and teacher policy as q, sampled from
+    student policy trajectories (reverse KL: KL(student || teacher)).
+
+    For details, see design/OPD+RL.md
+
+    Args:
+        enable (bool): Whether to enable OPD. Default: False.
+        warmup_steps (int): Number of pure RL steps before enabling OPD (Phase 1).
+            This allows the model to stabilize and fix format issues before applying teacher guidance.
+            Default: 0 (no warmup, OPD enabled from start).
+        pass_rate_threshold (float): Pass rate threshold for per-prompt gating.
+            Only apply OPD to prompts with pass_rate < threshold.
+            - 0.0: Only when all rollouts fail (very strict)
+            - 0.1: When ≥90% fail (strict, recommended starting point)
+            - 0.3: When ≥70% fail (balanced)
+            - 0.5: When majority fails (liberal)
+            Default: 0.1
+        kd_horizon (int): Maximum number of tokens to apply KD.
+            Primarily targets thinking tokens; stops before answer to prevent importing teacher's
+            final answer style. Default: 512
+        kd_coef (float): Coefficient for KD loss (β in the design doc).
+            Controls strength of teacher guidance relative to RL signal.
+            Start small and increase if hard problems aren't improving.
+            Default: 0.1
+        stop_before_answer_tokens (bool): Whether to stop KD before answer tokens.
+            If True and answer_token_ids provided, KD stops at first answer token appearance.
+            This ensures we only distill thinking process, not answer formatting.
+            Default: True
+        answer_token_ids (Optional[list[int]]): Token IDs indicating start of final answer (e.g., <answer>).
+            If provided and stop_before_answer_tokens=True, KD horizon = min(kd_horizon, t_ans).
+            Default: None
+        kd_loss_type (str): KL divergence estimator for OPD.
+            Options: "k1" (logprob diff), "k2" (MSE, recommended), "k3" (low-variance estimator).
+            Default: "k2"
+        teacher_server_ip (Optional[str]): IP address of teacher server (for client-server mode).
+            If None, falls back to using reference policy on same GPUs (not recommended).
+            Default: None
+        teacher_server_port (int): Port number of teacher server.
+            Default: 15555
+        teacher_n_workers (int): Number of parallel workers for teacher requests.
+            Should match server configuration.
+            Default: 1
+        teacher_timeout_ms (int): Timeout for teacher server responses in milliseconds.
+            Default: 600000 (10 minutes)
+    """
+
+    enable: bool = False
+    warmup_steps: int = 0
+    pass_rate_threshold: float = 0.1
+    kd_horizon: int = 512
+    kd_coef: float = 0.1
+    stop_before_answer_tokens: bool = True
+    answer_token_ids: Optional[list[int]] = None
+    kd_loss_type: str = "k2"
+    # Teacher server configuration (for client-server architecture)
+    teacher_server_ip: Optional[str] = None
+    teacher_server_port: int = 15555
+    teacher_n_workers: int = 1
+    teacher_timeout_ms: int = 600000
 
 
 @dataclass
@@ -467,6 +540,9 @@ class AlgoConfig(BaseConfig):
         use_pf_ppo (bool): Whether to enable preference feedback PPO.
         pf_ppo (dict[str, Any]): Preference feedback PPO settings.
         filter_groups (Optional[FilterGroupsConfig]): Filter groups configuration, used in DAPO and Entropy
+        opd (Optional[OPDConfig]): On-Policy Distillation configuration.
+            Applies selective teacher guidance on underperforming prompts to improve hard-tail performance
+            while avoiding length inflation. Set to None to disable. Default: None.
         rollout_correction (Optional[RolloutCorrectionConfig]): Rollout Correction configuration.
             Addresses off-policy issues from policy mismatch, model staleness, and general distribution shifts.
 
@@ -493,6 +569,9 @@ class AlgoConfig(BaseConfig):
     use_pf_ppo: bool = False
     pf_ppo: dict[str, Any] = field(default_factory=dict)
     filter_groups: Optional[FilterGroupsConfig] = None
+    # On-Policy Distillation: selective teacher guidance on underperforming prompts
+    # Set to None to disable
+    opd: Optional[OPDConfig] = None
     # Rollout Correction: corrects off-policy issues (policy mismatch, model staleness, distribution shifts)
     # Set to None to disable, use RolloutCorrectionConfig presets (e.g., .tis(), .mis()), or pass dict
     rollout_correction: Optional[RolloutCorrectionConfig] = None

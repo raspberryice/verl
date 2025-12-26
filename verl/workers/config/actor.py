@@ -107,6 +107,9 @@ class ActorConfig(BaseConfig):
         use_torch_compile (bool): Whether to use torch.compile for optimization.
         kl_loss_coef (float): KL divergence loss coefficient.
         kl_loss_type (str): Type of KL loss to use.
+        opd_config (Optional[dict]): Configuration for On-Policy Distillation (OPD).
+            If provided, enables selective teacher guidance on underperforming prompts.
+            Passed through from algorithm.opd config.
         ppo_epochs (int): Number of PPO epochs per training step.
         shuffle (bool): Whether to shuffle data during training.
         checkpoint (CheckpointConfig): Configuration for checkpointing.
@@ -147,6 +150,7 @@ class ActorConfig(BaseConfig):
     use_torch_compile: bool = True
     kl_loss_coef: float = 0.001
     kl_loss_type: str = "low_var_kl"
+    opd_config: Optional[dict] = None
     ppo_epochs: int = 1
     shuffle: bool = False
     data_loader_seed: int = 1

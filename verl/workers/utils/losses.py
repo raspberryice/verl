@@ -152,6 +152,57 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         metrics["kl_loss"] = kl_loss.detach().item()
         metrics["kl_coef"] = config.kl_loss_coef
 
+    # add OPD (On-Policy Distillation) KL loss
+    # Selective teacher guidance on underperforming prompts with horizon masking
+    if "opd_eligibility_mask" in data and "opd_horizon_mask" in data and "ref_log_prob" in data:
+        # Check if any samples are eligible for OPD (avoid unnecessary computation)
+        opd_eligibility_mask = data["opd_eligibility_mask"]  # [batch_size]
+        if opd_eligibility_mask.sum() > 0:
+            # Get OPD config from actor config
+            opd_config = getattr(config, "opd_config", None)
+            if opd_config is not None:
+                ref_log_prob = data["ref_log_prob"]  # [batch_size, seq_len]
+                opd_horizon_mask = data["opd_horizon_mask"]  # [batch_size, seq_len]
+
+                # Compute KL divergence (student || teacher)
+                kld = kl_penalty(
+                    logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=opd_config.get("kd_loss_type", "k2")
+                )  # [batch_size, seq_len]
+
+                # Apply combined masking: response_mask × eligibility_mask × horizon_mask
+                # eligibility_mask is per-sample, need to expand to [batch_size, seq_len]
+                opd_eligibility_mask_expanded = opd_eligibility_mask.unsqueeze(-1).expand_as(
+                    response_mask
+                )  # [batch_size, seq_len]
+
+                # Combined mask: only compute KD on eligible samples, within response, within horizon
+                opd_combined_mask = (
+                    response_mask.float() * opd_eligibility_mask_expanded * opd_horizon_mask
+                )  # [batch_size, seq_len]
+
+                # Aggregate KD loss
+                opd_kl_loss = agg_loss(
+                    loss_mat=kld,
+                    loss_mask=opd_combined_mask.to(bool),
+                    loss_agg_mode=config.loss_agg_mode,
+                    **config.global_batch_info,
+                )
+
+                # Add to policy loss with OPD coefficient
+                opd_kd_coef = opd_config.get("kd_coef", 0.1)
+                policy_loss += opd_kl_loss * opd_kd_coef
+
+                # Log OPD KL metrics
+                metrics["opd/kl_loss"] = opd_kl_loss.detach().item()
+                metrics["opd/kd_coef"] = opd_kd_coef
+                metrics["opd/num_eligible_samples"] = opd_eligibility_mask.sum().item()
+                # Compute fraction of tokens receiving KD
+                total_response_tokens = response_mask.float().sum().item()
+                opd_tokens = opd_combined_mask.sum().item()
+                metrics["opd/frac_tokens_with_kd"] = (
+                    opd_tokens / total_response_tokens if total_response_tokens > 0 else 0.0
+                )
+
     return policy_loss, metrics
 
 

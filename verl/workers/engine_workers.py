@@ -380,7 +380,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.config.ref.use_dynamic_bsz = self.config.ref.pop("log_prob_use_dynamic_bsz", False)
                 self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop("log_prob_max_token_len_per_gpu", None)
             ref_config: ActorConfig = omega_conf_to_dataclass(self.config.ref)
-            ref_config.model_config = model_config
+
+            # For OPD: Allow separate teacher model checkpoint for reference policy
+            # Check if ref.model_path is specified (for OPD teacher model)
+            if hasattr(self.config.ref, "model_path") and self.config.ref.model_path is not None:
+                # Create separate model config for teacher with different checkpoint path
+                import copy
+
+                ref_model_config = copy.deepcopy(model_config)
+                ref_model_config.path = self.config.ref.model_path
+                ref_config.model_config = ref_model_config
+            else:
+                # Use same model config as actor (original behavior)
+                ref_config.model_config = model_config
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(
@@ -407,6 +419,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
+
+            # Pass OPD config from algorithm to actor config (for selective KD in loss)
+            # Config is stored as a dict in actor_config.opd_config and accessed in losses.py
+            if hasattr(self.config, "algorithm") and hasattr(self.config.algorithm, "opd"):
+                from omegaconf import OmegaConf
+
+                actor_config.opd_config = OmegaConf.to_container(self.config.algorithm.opd, resolve=True)
 
             actor_training_config = TrainingWorkerConfig(
                 model_type="language_model",

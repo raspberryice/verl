@@ -317,6 +317,16 @@ class RayPPOTrainer:
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
 
+        # Inject OPD config into actor config for loss computation
+        # This allows the loss function to access OPD settings
+        if hasattr(config.algorithm, "opd") and config.algorithm.opd is not None:
+            from omegaconf import OmegaConf, open_dict
+
+            with open_dict(config.actor_rollout_ref.actor):
+                config.actor_rollout_ref.actor.opd_config = OmegaConf.to_container(
+                    config.algorithm.opd, resolve=True
+                )
+
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
 
@@ -1503,6 +1513,77 @@ class RayPPOTrainer:
                             batch, is_metrics = compute_rollout_correction_and_add_to_batch(batch, rollout_corr_config)
                             # IS and off-policy metrics already have rollout_corr/ prefix
                             metrics.update(is_metrics)
+
+                        # Compute OPD (On-Policy Distillation) masks if enabled
+                        # OPD applies selective teacher guidance on underperforming prompts
+                        opd_config = self.config.algorithm.get("opd", None)
+                        if opd_config is not None and opd_config.get("enable", False):
+                            from verl.trainer.ppo.opd_helper import (
+                                compute_opd_metrics,
+                                compute_prompt_pass_rates,
+                                create_horizon_mask,
+                                create_opd_eligibility_mask,
+                                should_apply_opd,
+                            )
+
+                            # Check if we should apply OPD at this training step (two-phase schedule)
+                            apply_opd = should_apply_opd(
+                                global_step=self.global_steps,
+                                warmup_steps=opd_config.get("warmup_steps", 0),
+                                enable_opd=opd_config.get("enable", False),
+                            )
+
+                            if apply_opd:
+                                # Compute per-prompt pass rates
+                                n_samples_per_prompt = self.config.actor_rollout_ref.rollout.n
+                                pass_rates = compute_prompt_pass_rates(
+                                    batch, n_samples_per_prompt=n_samples_per_prompt, reward_key="token_level_scores"
+                                )
+
+                                # Create OPD eligibility mask: pass_rate < θ AND R_i = 0
+                                opd_eligibility_mask = create_opd_eligibility_mask(
+                                    batch,
+                                    pass_rates=pass_rates,
+                                    threshold=opd_config.get("pass_rate_threshold", 0.1),
+                                    n_samples_per_prompt=n_samples_per_prompt,
+                                    reward_key="token_level_scores",
+                                )
+
+                                # Create horizon mask: stop KD before answer tokens
+                                horizon_mask = create_horizon_mask(
+                                    batch,
+                                    horizon=opd_config.get("kd_horizon", 512),
+                                    stop_before_answer_tokens=opd_config.get("stop_before_answer_tokens", True),
+                                    answer_token_ids=opd_config.get("answer_token_ids", None),
+                                )
+
+                                # Store masks in batch for use in loss computation
+                                batch.batch["opd_eligibility_mask"] = opd_eligibility_mask
+                                batch.batch["opd_horizon_mask"] = horizon_mask
+
+                                # Compute and log OPD diagnostics
+                                opd_metrics = compute_opd_metrics(
+                                    batch,
+                                    pass_rates=pass_rates,
+                                    opd_mask=opd_eligibility_mask,
+                                    n_samples_per_prompt=n_samples_per_prompt,
+                                    threshold=opd_config.get("pass_rate_threshold", 0.1),
+                                )
+                                metrics.update(opd_metrics)
+                            else:
+                                # Warmup phase: no OPD, set masks to zero
+                                import torch
+
+                                batch_size = batch.batch["token_level_scores"].shape[0]
+                                seq_len = batch.batch["response_mask"].shape[1]
+                                device = batch.batch["response_mask"].device
+
+                                batch.batch["opd_eligibility_mask"] = torch.zeros(
+                                    batch_size, dtype=torch.float32, device=device
+                                )
+                                batch.batch["opd_horizon_mask"] = torch.zeros(
+                                    (batch_size, seq_len), dtype=torch.float32, device=device
+                                )
 
                         # compute advantages, executed on the driver process
                         norm_adv_by_std_in_grpo = self.config.algorithm.get(
