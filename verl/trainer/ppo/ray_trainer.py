@@ -1563,17 +1563,13 @@ class RayPPOTrainer:
 
                                 # Compute and log OPD diagnostics
                                 opd_metrics = compute_opd_metrics(
-                                    batch,
                                     pass_rates=pass_rates,
                                     opd_mask=opd_eligibility_mask,
-                                    n_samples_per_prompt=n_samples_per_prompt,
                                     threshold=opd_config.get("pass_rate_threshold", 0.1),
                                 )
                                 metrics.update(opd_metrics)
                             else:
                                 # Warmup phase: no OPD, set masks to zero
-                                import torch
-
                                 batch_size = batch.batch["token_level_scores"].shape[0]
                                 seq_len = batch.batch["response_mask"].shape[1]
                                 device = batch.batch["response_mask"].device

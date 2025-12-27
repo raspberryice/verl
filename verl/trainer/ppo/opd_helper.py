@@ -228,64 +228,36 @@ def create_horizon_mask(
 
 
 def compute_opd_metrics(
-    batch: DataProto,
     pass_rates: torch.Tensor,
     opd_mask: torch.Tensor,
-    n_samples_per_prompt: int,
     threshold: float,
 ) -> dict[str, float]:
     """
-    Compute diagnostics metrics for OPD application.
+    Compute essential diagnostics metrics for OPD application.
 
     Args:
-        batch: DataProto containing rollout data
         pass_rates: Per-prompt pass rates [num_prompts]
         opd_mask: Per-sample OPD eligibility mask [batch_size]
-        n_samples_per_prompt: Number of samples per prompt
         threshold: Pass rate threshold used for gating
 
     Returns:
-        metrics: Dictionary with OPD diagnostic metrics
+        metrics: Dictionary with essential OPD diagnostic metrics
     """
     num_prompts = pass_rates.shape[0]
     batch_size = opd_mask.shape[0]
 
-    # Prompt-level metrics
-    num_underperforming_prompts = (pass_rates < threshold).sum().item()
-    frac_underperforming_prompts = num_underperforming_prompts / num_prompts
-    mean_pass_rate = pass_rates.mean().item()
-    mean_pass_rate_underperforming = pass_rates[pass_rates < threshold].mean().item() if num_underperforming_prompts > 0 else 0.0
+    # Key metric 1: What fraction of prompts get OPD?
+    # (Expect ~10-30% early, should decrease as model improves)
+    num_underperforming = (pass_rates < threshold).sum().item()
+    frac_underperforming_prompts = num_underperforming / num_prompts
 
-    # Sample-level metrics
-    num_opd_samples = opd_mask.sum().item()
-    frac_opd_samples = num_opd_samples / batch_size
-
-    # Compute total failures for comparison
-    token_level_rewards = batch.batch["token_level_scores"]
-    response_mask = batch.batch.get("response_mask", None)
-    if response_mask is not None:
-        rollout_rewards = (token_level_rewards * response_mask).sum(dim=-1)
-    else:
-        rollout_rewards = token_level_rewards.sum(dim=-1)
-
-    num_failures = (rollout_rewards <= 0).sum().item()
-    frac_failures = num_failures / batch_size
-
-    # What fraction of failures get OPD? (should be < 1.0 due to prompt gating)
-    frac_failures_getting_opd = num_opd_samples / num_failures if num_failures > 0 else 0.0
+    # Key metric 2: What fraction of rollouts get teacher guidance?
+    # (< frac_failures due to prompt gating)
+    frac_opd_samples = opd_mask.sum().item() / batch_size
 
     metrics = {
-        "opd/num_prompts": num_prompts,
-        "opd/num_underperforming_prompts": num_underperforming_prompts,
         "opd/frac_underperforming_prompts": frac_underperforming_prompts,
-        "opd/mean_pass_rate": mean_pass_rate,
-        "opd/mean_pass_rate_underperforming": mean_pass_rate_underperforming,
-        "opd/num_opd_samples": num_opd_samples,
         "opd/frac_opd_samples": frac_opd_samples,
-        "opd/num_failures": num_failures,
-        "opd/frac_failures": frac_failures,
-        "opd/frac_failures_getting_opd": frac_failures_getting_opd,
-        "opd/threshold": threshold,
     }
 
     return metrics

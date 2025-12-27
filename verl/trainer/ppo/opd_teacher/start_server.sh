@@ -16,6 +16,9 @@ MAX_LEN=${MAX_LEN:-16384}
 # Optional: Set visible GPUs for teacher server
 # export CUDA_VISIBLE_DEVICES=0,1  # Separate GPUs from student training
 
+# Fix CUDA multiprocessing error: vLLM must use 'spawn' instead of 'fork'
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+
 echo "============================================"
 echo "Starting OPD Teacher Server"
 echo "============================================"
