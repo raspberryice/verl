@@ -84,8 +84,22 @@ class OPDTeacherServer:
         # Setup ZeroMQ server
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.REP)
-        self.socket.bind(f"tcp://*:{port}")
-        logger.info(f"OPD Teacher server listening on port {port}")
+
+        # Set socket options to allow immediate rebind after restart
+        self.socket.setsockopt(zmq.LINGER, 0)  # Don't wait for pending messages on close
+
+        try:
+            self.socket.bind(f"tcp://*:{port}")
+            logger.info(f"OPD Teacher server listening on port {port}")
+        except zmq.error.ZMQError as e:
+            if "Address already in use" in str(e):
+                logger.error(f"Port {port} is already in use.")
+                logger.error("Try: 1) Wait 30 seconds for kernel to release port, or")
+                logger.error("     2) Find process with: netstat -tlnp | grep {port}")
+                logger.error("     3) Kill process with: kill -9 <PID>")
+                raise
+            else:
+                raise
 
     def compute_logprobs(self, input_ids: list[list[int]], attention_mask: list[list[int]]) -> list[torch.Tensor]:
         """Compute log probabilities for given input sequences.
@@ -134,8 +148,9 @@ class OPDTeacherServer:
                     prompt_logprobs=len(self.tokenizer),  # Request all logprobs
                 )
 
+                # vLLM 0.10.0+ API: pass prompt_token_ids in prompts parameter
                 outputs = self.llm.generate(
-                    prompt_token_ids=[valid_ids],
+                    prompts=[{"prompt_token_ids": valid_ids}],
                     sampling_params=sampling_params,
                     use_tqdm=False,
                 )
