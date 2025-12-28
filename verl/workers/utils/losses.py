@@ -161,10 +161,11 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
             # Get OPD config from actor config
             opd_config = getattr(config, "opd_config", None)
             if opd_config is not None:
-                teacher_log_probs = data["teacher_log_probs"]  # [batch_size, seq_len, vocab_size]
+                teacher_log_probs = data["teacher_log_probs"]  # [batch_size, seq_len] - scalar logprobs
                 opd_horizon_mask = data["opd_horizon_mask"]  # [batch_size, seq_len]
 
-                # Compute KL divergence (student || teacher)
+                # Compute KL divergence (student || teacher) using K2 estimator
+                # K2: 0.5 * (log_prob_student - log_prob_teacher)^2
                 kld = kl_penalty(
                     logprob=log_prob, ref_logprob=teacher_log_probs, kl_penalty=opd_config.get("kd_loss_type", "k2")
                 )  # [batch_size, seq_len]

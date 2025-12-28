@@ -121,23 +121,20 @@ def get_teacher_logprobs(batch: DataProto, teacher_client, n_server_workers: int
         tik2 = time.time()
 
         # Pad logprobs to match input batch shape
-        # Teacher returns [seq_len-1, vocab_size] per sequence (predicting next token)
-        # We need to pad to [batch_size, max_seq_len, vocab_size] for batch processing
+        # Teacher returns [seq_len-1] per sequence (logprob of each token)
+        # We need to pad to [batch_size, max_seq_len] for batch processing
 
         max_seq_len = batch.batch["input_ids"].shape[1]
-        vocab_size = all_teacher_logprobs[0].shape[1] if len(all_teacher_logprobs) > 0 else 50257  # fallback
 
-        # Create padded tensor
-        teacher_logprobs_padded = torch.zeros(
-            batch_size, max_seq_len, vocab_size, dtype=torch.float32
-        )
+        # Create padded tensor (scalar logprobs, not distributions)
+        teacher_logprobs_padded = torch.zeros(batch_size, max_seq_len, dtype=torch.float32)
 
         for i in range(batch_size):
-            logprobs = all_teacher_logprobs[i]  # [seq_len-1, vocab_size]
+            logprobs = all_teacher_logprobs[i]  # [seq_len-1]
             seq_len = logprobs.shape[0]
 
             # Place logprobs in padded tensor
-            # Note: logprobs[i] predicts token[i+1], so we offset by 1
+            # Note: logprobs[j] is the logprob of token[j+1] given context[0:j+1]
             if seq_len > 0:
                 mask = attention_mask_bool[i]
                 # Find positions where mask is True
@@ -145,11 +142,9 @@ def get_teacher_logprobs(batch: DataProto, teacher_client, n_server_workers: int
                 if len(valid_positions) > 1:
                     # Place logprobs starting from position 1 (predicting position 2 onwards)
                     end_pos = min(len(valid_positions), seq_len + 1)
-                    teacher_logprobs_padded[i, valid_positions[1:end_pos]] = logprobs[:end_pos - 1]
+                    teacher_logprobs_padded[i, valid_positions[1:end_pos]] = logprobs[: end_pos - 1]
 
-        # Convert to log probabilities tensor (ensure it's log probs, not raw logits)
-        # vLLM already returns log probabilities, so no need to apply log_softmax
-
+        # Teacher logprobs are now [batch_size, seq_len] to match student log_probs
         output_batch = DataProto.from_single_dict(
             data={"teacher_log_probs": teacher_logprobs_padded},
         )

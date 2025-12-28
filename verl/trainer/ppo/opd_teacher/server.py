@@ -102,19 +102,22 @@ class OPDTeacherServer:
                 raise
 
     def compute_logprobs(self, input_ids: list[list[int]], attention_mask: list[list[int]]) -> list[torch.Tensor]:
-        """Compute log probabilities for given input sequences.
+        """Compute log probabilities for the tokens in each sequence using vLLM.
+
+        For K2 KL estimator, we only need the teacher's logprob of each token given its context.
 
         Args:
-            input_ids (list[list[int]]): List of input ID sequences
+            input_ids (list[list[int]]): List of input ID sequences (student's generated sequences)
             attention_mask (list[list[int]]): List of attention masks
 
         Returns:
-            list[torch.Tensor]: List of log probability tensors, each of shape [seq_len, vocab_size]
+            list[torch.Tensor]: List of log probability tensors, each of shape [seq_len-1]
+                                (logprob of each token given previous context)
         """
         batch_size = len(input_ids)
         all_logprobs = []
 
-        # Process each sequence (teacher-forcing: compute logprobs for existing tokens)
+        # Process each sequence
         for i in range(batch_size):
             ids = input_ids[i]
             mask = attention_mask[i]
@@ -125,61 +128,64 @@ class OPDTeacherServer:
             else:
                 valid_ids = [token_id for token_id, m in zip(ids, mask) if m > 0]
 
-            if len(valid_ids) == 0:
-                logger.warning(f"Empty sequence at index {i}, skipping")
-                all_logprobs.append(torch.zeros(0, len(self.tokenizer), dtype=torch.float32))
+            if len(valid_ids) <= 1:
+                # Need at least 2 tokens to compute logprobs (input -> prediction)
+                all_logprobs.append(torch.zeros(0, dtype=torch.float32))
                 continue
 
             try:
-                # Use vLLM to compute logprobs in teacher-forcing mode
-                # We do this by:
-                # 1. Passing the sequence as prompt tokens
-                # 2. Requesting logprobs for all positions via prompt_logprobs
-                # Note: vLLM's API may vary; this is a conceptual implementation
-                # In practice, you may need to use the model's forward pass directly
-
-                # For now, we'll use a workaround: generate with max_tokens=1 but extract prompt logprobs
-                # TODO: Replace with direct model forward pass for efficiency
+                # Use vLLM to compute prompt logprobs
                 from vllm import SamplingParams
 
                 sampling_params = SamplingParams(
                     temperature=0.0,
                     max_tokens=1,  # We only care about prompt logprobs
-                    prompt_logprobs=len(self.tokenizer),  # Request all logprobs
+                    prompt_logprobs=1,  # Get logprob for the actual next token
                 )
 
                 # vLLM 0.10.0+ API: pass prompt_token_ids in prompts parameter
                 outputs = self.llm.generate(
-                    prompts=[{"prompt_token_ids": valid_ids}],
-                    sampling_params=sampling_params,
-                    use_tqdm=False,
+                    prompts=[{"prompt_token_ids": valid_ids}], sampling_params=sampling_params, use_tqdm=False
                 )
 
-                # Extract logprobs from prompt processing
+                # Extract prompt logprobs
                 output = outputs[0]
                 prompt_logprobs = output.prompt_logprobs
 
                 if prompt_logprobs is None:
-                    raise RuntimeError("Failed to get prompt logprobs from vLLM")
+                    logger.warning(f"No prompt logprobs returned for sequence {i}")
+                    all_logprobs.append(torch.zeros(len(valid_ids) - 1, dtype=torch.float32))
+                    continue
 
-                # Convert to tensor [seq_len-1, vocab_size]
-                # Note: prompt_logprobs[i] contains logprobs for predicting token i+1
-                seq_len = len(valid_ids)
-                vocab_size = len(self.tokenizer)
-                logprobs_tensor = torch.zeros(seq_len - 1, vocab_size, dtype=torch.float32)
+                # Extract logprob of each token
+                # prompt_logprobs[j] contains logprobs for predicting token j (given tokens 0:j-1)
+                # We want logprobs for tokens [1:seq_len] given their context
+                token_logprobs = []
+                for pos in range(1, len(valid_ids)):  # Start from position 1 (skip first token, no context)
+                    if prompt_logprobs[pos] is not None:
+                        # Get the logprob for the actual token at this position
+                        actual_token_id = valid_ids[pos]
+                        if actual_token_id in prompt_logprobs[pos]:
+                            logprob = prompt_logprobs[pos][actual_token_id].logprob
+                        else:
+                            # Token not in returned logprobs, use very low probability
+                            logger.warning(
+                                f"Token {actual_token_id} not in prompt_logprobs at position {pos}, using default"
+                            )
+                            logprob = -100.0  # Very low logprob
+                        token_logprobs.append(logprob)
+                    else:
+                        token_logprobs.append(0.0)
 
-                for pos, logprob_dict in enumerate(prompt_logprobs[1:]):  # Skip first position (no prediction)
-                    if logprob_dict is not None:
-                        for token_id, logprob in logprob_dict.items():
-                            if isinstance(token_id, int):
-                                logprobs_tensor[pos, token_id] = logprob
-
-                all_logprobs.append(logprobs_tensor)
+                all_logprobs.append(torch.tensor(token_logprobs, dtype=torch.float32))
 
             except Exception as e:
                 logger.error(f"Error computing logprobs for sequence {i}: {e}")
+                import traceback
+
+                traceback.print_exc()
                 # Return zeros on error
-                all_logprobs.append(torch.zeros(len(valid_ids) - 1, len(self.tokenizer), dtype=torch.float32))
+                all_logprobs.append(torch.zeros(len(valid_ids) - 1, dtype=torch.float32))
 
         return all_logprobs
 
