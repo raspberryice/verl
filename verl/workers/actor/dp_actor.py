@@ -419,6 +419,9 @@ class DataParallelPPOActor(BasePPOActor):
         # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
         if "rollout_log_probs" in data.batch.keys():
             select_keys.append("rollout_log_probs")
+        # Include OPD keys if present
+        if "teacher_log_probs" in data.batch.keys():
+            select_keys.extend(["teacher_log_probs", "opd_eligibility_mask", "opd_horizon_mask"])
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
@@ -532,6 +535,55 @@ class DataParallelPPOActor(BasePPOActor):
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                         micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item() * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                    # Add OPD (On-Policy Distillation) KL loss
+                    # Selective teacher guidance on underperforming prompts with horizon masking
+                    if "opd_eligibility_mask" in model_inputs and "opd_horizon_mask" in model_inputs and "teacher_log_probs" in model_inputs:
+                        opd_eligibility_mask = model_inputs["opd_eligibility_mask"]  # [batch_size]
+
+                        # Add diagnostic metrics
+                        micro_batch_metrics["actor/opd/debug/has_all_keys"] = 1.0
+
+                        if opd_eligibility_mask.sum() > 0:
+                            # Get OPD config from actor config
+                            opd_config = getattr(self.config, "opd_config", None)
+
+                            micro_batch_metrics["actor/opd/debug/num_eligible"] = opd_eligibility_mask.sum().item()
+                            micro_batch_metrics["actor/opd/debug/has_opd_config"] = 1.0 if opd_config is not None else 0.0
+
+                            if opd_config is not None:
+                                teacher_log_probs = model_inputs["teacher_log_probs"]  # [batch_size, seq_len]
+                                opd_horizon_mask = model_inputs["opd_horizon_mask"]  # [batch_size, seq_len]
+
+                                # Compute KL divergence (student || teacher) using K2 estimator
+                                kld_opd = kl_penalty(
+                                    logprob=log_prob, ref_logprob=teacher_log_probs, kl_penalty=opd_config.get("kd_loss_type", "k2")
+                                )
+
+                                # Apply combined masking: response_mask × eligibility_mask × horizon_mask
+                                opd_eligibility_mask_expanded = opd_eligibility_mask.unsqueeze(-1).expand_as(response_mask)
+                                opd_combined_mask = response_mask.float() * opd_eligibility_mask_expanded * opd_horizon_mask
+
+                                # Aggregate KD loss
+                                opd_kl_loss = agg_loss(loss_mat=kld_opd, loss_mask=opd_combined_mask.to(torch.bool), loss_agg_mode=loss_agg_mode)
+
+                                # Add to policy loss with OPD coefficient
+                                opd_kd_coef = opd_config.get("kd_coef", 0.1)
+                                policy_loss += opd_kl_loss * opd_kd_coef
+
+                                # Log OPD KL metrics
+                                micro_batch_metrics["actor/opd/kl_loss"] = opd_kl_loss.detach().item() * loss_scale_factor
+                                micro_batch_metrics["actor/opd/kd_coef"] = opd_kd_coef
+                                micro_batch_metrics["actor/opd/num_eligible_samples"] = opd_eligibility_mask.sum().item()
+
+                                # Compute fraction of tokens receiving KD
+                                total_response_tokens = response_mask.float().sum().item()
+                                opd_tokens = opd_combined_mask.sum().item()
+                                micro_batch_metrics["actor/opd/frac_tokens_with_kd"] = (
+                                    opd_tokens / total_response_tokens if total_response_tokens > 0 else 0.0
+                                )
+                        else:
+                            micro_batch_metrics["actor/opd/debug/zero_eligible"] = 1.0
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
