@@ -327,6 +327,27 @@ class RayPPOTrainer:
                     config.algorithm.opd, resolve=True
                 )
 
+        # Initialize OPD teacher client if enabled
+        self.teacher_client = None
+        opd_config = config.algorithm.get("opd", None)
+        if opd_config is not None and opd_config.get("enable", False):
+            teacher_ip = opd_config.get("teacher_server_ip", None)
+            teacher_port = opd_config.get("teacher_server_port", 15555)
+
+            if teacher_ip is not None:
+                from verl.trainer.ppo.opd_teacher import OPDTeacherClient
+
+                logger.info(f"Initializing OPD teacher client: {teacher_ip}:{teacher_port}")
+                self.teacher_client = OPDTeacherClient(
+                    server_ip=teacher_ip,
+                    server_port=teacher_port,
+                    n_server_workers=opd_config.get("teacher_n_workers", 1),
+                    timeout_ms=opd_config.get("teacher_timeout_ms", 600000),
+                )
+                logger.info("OPD teacher client initialized successfully")
+            else:
+                logger.warning("OPD enabled but teacher_server_ip not configured - OPD will not be applied")
+
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
 
@@ -1560,6 +1581,38 @@ class RayPPOTrainer:
                                 # Store masks in batch for use in loss computation
                                 batch.batch["opd_eligibility_mask"] = opd_eligibility_mask
                                 batch.batch["opd_horizon_mask"] = horizon_mask
+
+                                # Fetch teacher log probabilities from teacher server
+                                if self.teacher_client is not None:
+                                    from verl.trainer.ppo.opd_teacher import get_teacher_logprobs
+
+                                    batch_size = opd_eligibility_mask.shape[0]
+                                    num_eligible = opd_eligibility_mask.sum().item()
+                                    logger.info(
+                                        f"Fetching teacher logprobs for {num_eligible:.0f}/{batch_size} eligible samples"
+                                    )
+
+                                    teacher_batch = get_teacher_logprobs(
+                                        batch=batch,
+                                        teacher_client=self.teacher_client,
+                                        n_server_workers=opd_config.get("teacher_n_workers", 1),
+                                        is_async=False,
+                                    )
+
+                                    # Union teacher logprobs into main batch
+                                    batch = batch.union(teacher_batch)
+
+                                    # Verify teacher logprobs were added
+                                    if "teacher_log_probs" in batch.batch:
+                                        logger.info(
+                                            f"Teacher logprobs received: shape={batch.batch['teacher_log_probs'].shape}"
+                                        )
+                                    else:
+                                        logger.error("Teacher logprobs not found in batch after fetching!")
+                                else:
+                                    logger.warning(
+                                        "OPD enabled but teacher_client is None - skipping teacher guidance"
+                                    )
 
                                 # Compute and log OPD diagnostics
                                 opd_metrics = compute_opd_metrics(

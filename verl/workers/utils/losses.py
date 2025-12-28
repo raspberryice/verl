@@ -154,19 +154,19 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     # add OPD (On-Policy Distillation) KL loss
     # Selective teacher guidance on underperforming prompts with horizon masking
-    if "opd_eligibility_mask" in data and "opd_horizon_mask" in data and "ref_log_prob" in data:
+    if "opd_eligibility_mask" in data and "opd_horizon_mask" in data and "teacher_log_probs" in data:
         # Check if any samples are eligible for OPD (avoid unnecessary computation)
         opd_eligibility_mask = data["opd_eligibility_mask"]  # [batch_size]
         if opd_eligibility_mask.sum() > 0:
             # Get OPD config from actor config
             opd_config = getattr(config, "opd_config", None)
             if opd_config is not None:
-                ref_log_prob = data["ref_log_prob"]  # [batch_size, seq_len]
+                teacher_log_probs = data["teacher_log_probs"]  # [batch_size, seq_len, vocab_size]
                 opd_horizon_mask = data["opd_horizon_mask"]  # [batch_size, seq_len]
 
                 # Compute KL divergence (student || teacher)
                 kld = kl_penalty(
-                    logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=opd_config.get("kd_loss_type", "k2")
+                    logprob=log_prob, ref_logprob=teacher_log_probs, kl_penalty=opd_config.get("kd_loss_type", "k2")
                 )  # [batch_size, seq_len]
 
                 # Apply combined masking: response_mask × eligibility_mask × horizon_mask
