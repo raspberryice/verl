@@ -337,16 +337,16 @@ class RayPPOTrainer:
             if teacher_ip is not None:
                 from verl.trainer.ppo.opd_teacher import OPDTeacherClient
 
-                logger.info(f"Initializing OPD teacher client: {teacher_ip}:{teacher_port}")
+                print(f"[OPD] Initializing teacher client: {teacher_ip}:{teacher_port}")
                 self.teacher_client = OPDTeacherClient(
                     server_ip=teacher_ip,
                     server_port=teacher_port,
                     n_server_workers=opd_config.get("teacher_n_workers", 1),
                     timeout_ms=opd_config.get("teacher_timeout_ms", 600000),
                 )
-                logger.info("OPD teacher client initialized successfully")
+                print("[OPD] Teacher client initialized successfully")
             else:
-                logger.warning("OPD enabled but teacher_server_ip not configured - OPD will not be applied")
+                print("[OPD] WARNING: OPD enabled but teacher_server_ip not configured - OPD will not be applied")
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -1588,8 +1588,8 @@ class RayPPOTrainer:
 
                                     batch_size = opd_eligibility_mask.shape[0]
                                     num_eligible = opd_eligibility_mask.sum().item()
-                                    logger.info(
-                                        f"Fetching teacher logprobs for {num_eligible:.0f}/{batch_size} eligible samples"
+                                    print(
+                                        f"[OPD] Fetching teacher logprobs for {num_eligible:.0f}/{batch_size} eligible samples"
                                     )
 
                                     teacher_batch = get_teacher_logprobs(
@@ -1604,15 +1604,13 @@ class RayPPOTrainer:
 
                                     # Verify teacher logprobs were added
                                     if "teacher_log_probs" in batch.batch:
-                                        logger.info(
-                                            f"Teacher logprobs received: shape={batch.batch['teacher_log_probs'].shape}"
+                                        print(
+                                            f"[OPD] Teacher logprobs received: shape={batch.batch['teacher_log_probs'].shape}"
                                         )
                                     else:
-                                        logger.error("Teacher logprobs not found in batch after fetching!")
+                                        print("[OPD] ERROR: Teacher logprobs not found in batch after fetching!")
                                 else:
-                                    logger.warning(
-                                        "OPD enabled but teacher_client is None - skipping teacher guidance"
-                                    )
+                                    print("[OPD] WARNING: teacher_client is None - skipping teacher guidance")
 
                                 # Compute and log OPD diagnostics
                                 opd_metrics = compute_opd_metrics(
