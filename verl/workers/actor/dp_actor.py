@@ -538,18 +538,23 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # Add OPD (On-Policy Distillation) KL loss
                     # Selective teacher guidance on underperforming prompts with horizon masking
+
+                    # Always initialize OPD metrics with defaults to avoid inhomogeneous arrays
+                    micro_batch_metrics["actor/opd/kl_loss"] = 0.0
+                    micro_batch_metrics["actor/opd/kd_coef"] = 0.0
+                    micro_batch_metrics["actor/opd/num_eligible_samples"] = 0.0
+                    micro_batch_metrics["actor/opd/frac_tokens_with_kd"] = 0.0
+
                     if "opd_eligibility_mask" in model_inputs and "opd_horizon_mask" in model_inputs and "teacher_log_probs" in model_inputs:
                         opd_eligibility_mask = model_inputs["opd_eligibility_mask"]  # [batch_size]
+                        num_eligible = opd_eligibility_mask.sum().item()
 
-                        # Add diagnostic metrics
-                        micro_batch_metrics["actor/opd/debug/has_all_keys"] = 1.0
+                        # Update num_eligible_samples metric
+                        micro_batch_metrics["actor/opd/num_eligible_samples"] = num_eligible
 
-                        if opd_eligibility_mask.sum() > 0:
+                        if num_eligible > 0:
                             # Get OPD config from actor config
                             opd_config = getattr(self.config, "opd_config", None)
-
-                            micro_batch_metrics["actor/opd/debug/num_eligible"] = opd_eligibility_mask.sum().item()
-                            micro_batch_metrics["actor/opd/debug/has_opd_config"] = 1.0 if opd_config is not None else 0.0
 
                             if opd_config is not None:
                                 teacher_log_probs = model_inputs["teacher_log_probs"]  # [batch_size, prompt_len + response_len]
@@ -577,10 +582,9 @@ class DataParallelPPOActor(BasePPOActor):
                                 opd_kd_coef = opd_config.get("kd_coef", 0.1)
                                 policy_loss += opd_kl_loss * opd_kd_coef
 
-                                # Log OPD KL metrics
+                                # Update OPD metrics (overwrite defaults)
                                 micro_batch_metrics["actor/opd/kl_loss"] = opd_kl_loss.detach().item() * loss_scale_factor
-                                micro_batch_metrics["actor/opd/kd_coef"] = opd_kd_coef
-                                micro_batch_metrics["actor/opd/num_eligible_samples"] = opd_eligibility_mask.sum().item()
+                                micro_batch_metrics["actor/opd/kd_coef"] = float(opd_kd_coef)
 
                                 # Compute fraction of tokens receiving KD
                                 total_response_tokens = response_mask.float().sum().item()
@@ -588,8 +592,6 @@ class DataParallelPPOActor(BasePPOActor):
                                 micro_batch_metrics["actor/opd/frac_tokens_with_kd"] = (
                                     opd_tokens / total_response_tokens if total_response_tokens > 0 else 0.0
                                 )
-                        else:
-                            micro_batch_metrics["actor/opd/debug/zero_eligible"] = 1.0
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
