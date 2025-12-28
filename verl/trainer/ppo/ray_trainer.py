@@ -1656,6 +1656,12 @@ class RayPPOTrainer:
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
+                        # Debug: Check if teacher_log_probs is still in batch before update_actor
+                        if "teacher_log_probs" in batch.batch:
+                            print(f"[OPD DEBUG] teacher_log_probs PRESENT before update_actor, shape={batch.batch['teacher_log_probs'].shape}")
+                        else:
+                            print("[OPD DEBUG] teacher_log_probs MISSING before update_actor")
+
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)

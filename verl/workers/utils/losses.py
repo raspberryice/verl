@@ -154,9 +154,26 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     # add OPD (On-Policy Distillation) KL loss
     # Selective teacher guidance on underperforming prompts with horizon masking
-    if "opd_eligibility_mask" in data and "opd_horizon_mask" in data and "teacher_log_probs" in data:
+    # Debug: Check what keys are present
+    has_eligibility = "opd_eligibility_mask" in data
+    has_horizon = "opd_horizon_mask" in data
+    has_teacher = "teacher_log_probs" in data
+
+    if not (has_eligibility and has_horizon and has_teacher):
+        # Log missing keys for debugging
+        missing = []
+        if not has_eligibility:
+            missing.append("opd_eligibility_mask")
+        if not has_horizon:
+            missing.append("opd_horizon_mask")
+        if not has_teacher:
+            missing.append("teacher_log_probs")
+        print(f"[OPD LOSS DEBUG] Missing keys: {missing}")
+
+    if has_eligibility and has_horizon and has_teacher:
         # Check if any samples are eligible for OPD (avoid unnecessary computation)
         opd_eligibility_mask = data["opd_eligibility_mask"]  # [batch_size]
+        print(f"[OPD LOSS DEBUG] Entering OPD loss computation, eligible={opd_eligibility_mask.sum().item()}")
         if opd_eligibility_mask.sum() > 0:
             # Get OPD config from actor config
             opd_config = getattr(config, "opd_config", None)
