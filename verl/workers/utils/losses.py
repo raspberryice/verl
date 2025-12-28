@@ -159,24 +159,27 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     has_horizon = "opd_horizon_mask" in data
     has_teacher = "teacher_log_probs" in data
 
-    if not (has_eligibility and has_horizon and has_teacher):
-        # Log missing keys for debugging
-        missing = []
-        if not has_eligibility:
-            missing.append("opd_eligibility_mask")
-        if not has_horizon:
-            missing.append("opd_horizon_mask")
-        if not has_teacher:
-            missing.append("teacher_log_probs")
-        print(f"[OPD LOSS DEBUG] Missing keys: {missing}")
+    # Add diagnostic metrics that will show up in W&B (metrics get aggregated back to driver)
+    metrics["opd/debug/has_eligibility_mask"] = 1.0 if has_eligibility else 0.0
+    metrics["opd/debug/has_horizon_mask"] = 1.0 if has_horizon else 0.0
+    metrics["opd/debug/has_teacher_logprobs"] = 1.0 if has_teacher else 0.0
 
     if has_eligibility and has_horizon and has_teacher:
         # Check if any samples are eligible for OPD (avoid unnecessary computation)
         opd_eligibility_mask = data["opd_eligibility_mask"]  # [batch_size]
-        print(f"[OPD LOSS DEBUG] Entering OPD loss computation, eligible={opd_eligibility_mask.sum().item()}")
-        if opd_eligibility_mask.sum() > 0:
+        num_eligible = opd_eligibility_mask.sum().item()
+
+        # Add metric for eligible samples count (will show up in W&B)
+        metrics["opd/debug/num_eligible_in_loss_fn"] = num_eligible
+
+        if num_eligible > 0:
             # Get OPD config from actor config
             opd_config = getattr(config, "opd_config", None)
+
+            # Add metric to confirm we entered inner condition
+            metrics["opd/debug/entered_inner_condition"] = 1.0
+            metrics["opd/debug/has_opd_config"] = 1.0 if opd_config is not None else 0.0
+
             if opd_config is not None:
                 teacher_log_probs = data["teacher_log_probs"]  # [batch_size, seq_len] - scalar logprobs
                 opd_horizon_mask = data["opd_horizon_mask"]  # [batch_size, seq_len]
@@ -213,13 +216,17 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
                 # Log OPD KL metrics
                 metrics["opd/kl_loss"] = opd_kl_loss.detach().item()
                 metrics["opd/kd_coef"] = opd_kd_coef
-                metrics["opd/num_eligible_samples"] = opd_eligibility_mask.sum().item()
+                metrics["opd/num_eligible_samples"] = num_eligible
+                metrics["opd/debug/loss_computation_executed"] = 1.0  # Confirm we got here
                 # Compute fraction of tokens receiving KD
                 total_response_tokens = response_mask.float().sum().item()
                 opd_tokens = opd_combined_mask.sum().item()
                 metrics["opd/frac_tokens_with_kd"] = (
                     opd_tokens / total_response_tokens if total_response_tokens > 0 else 0.0
                 )
+        else:
+            # num_eligible == 0 in this mini-batch
+            metrics["opd/debug/zero_eligible_in_minibatch"] = 1.0
 
     return policy_loss, metrics
 
