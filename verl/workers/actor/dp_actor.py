@@ -421,7 +421,7 @@ class DataParallelPPOActor(BasePPOActor):
             select_keys.append("rollout_log_probs")
         # Include OPD keys if present
         if "teacher_log_probs" in data.batch.keys():
-            select_keys.extend(["teacher_log_probs", "opd_eligibility_mask", "opd_horizon_mask"])
+            select_keys.extend(["teacher_log_probs", "opd_eligibility_mask", "opd_horizon_mask", "prompts"])
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
@@ -552,12 +552,18 @@ class DataParallelPPOActor(BasePPOActor):
                             micro_batch_metrics["actor/opd/debug/has_opd_config"] = 1.0 if opd_config is not None else 0.0
 
                             if opd_config is not None:
-                                teacher_log_probs = model_inputs["teacher_log_probs"]  # [batch_size, seq_len]
+                                teacher_log_probs = model_inputs["teacher_log_probs"]  # [batch_size, prompt_len + response_len]
                                 opd_horizon_mask = model_inputs["opd_horizon_mask"]  # [batch_size, seq_len]
+
+                                # Slice teacher logprobs to response-only to match student log_prob shape
+                                # student log_prob: [batch_size, response_len]
+                                # teacher_log_probs: [batch_size, prompt_len + response_len]
+                                prompt_len = model_inputs["prompts"].shape[1]
+                                teacher_log_probs_response = teacher_log_probs[:, prompt_len:]  # [batch_size, response_len]
 
                                 # Compute KL divergence (student || teacher) using K2 estimator
                                 kld_opd = kl_penalty(
-                                    logprob=log_prob, ref_logprob=teacher_log_probs, kl_penalty=opd_config.get("kd_loss_type", "k2")
+                                    logprob=log_prob, ref_logprob=teacher_log_probs_response, kl_penalty=opd_config.get("kd_loss_type", "k2")
                                 )
 
                                 # Apply combined masking: response_mask × eligibility_mask × horizon_mask
