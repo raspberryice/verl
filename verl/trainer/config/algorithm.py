@@ -85,13 +85,9 @@ class OPDConfig(BaseConfig):
             - 0.3: When ≥70% fail (balanced)
             - 0.5: When majority fails (liberal)
             Default: 0.1
-        kd_horizon (int): Maximum number of tokens to apply KD.
+        kd_horizon (int): Maximum number of tokens to apply KD guidance via advantage replacement.
             Primarily targets thinking tokens; stops before answer to prevent importing teacher's
             final answer style. Default: 512
-        kd_coef (float): Coefficient for KD loss (β in the design doc).
-            Controls strength of teacher guidance relative to RL signal.
-            Start small and increase if hard problems aren't improving.
-            Default: 0.1
         stop_before_answer_tokens (bool): Whether to stop KD before answer tokens.
             If True and answer_token_ids provided, KD stops at first answer token appearance.
             This ensures we only distill thinking process, not answer formatting.
@@ -99,9 +95,6 @@ class OPDConfig(BaseConfig):
         answer_token_ids (Optional[list[int]]): Token IDs indicating start of final answer (e.g., <answer>).
             If provided and stop_before_answer_tokens=True, KD horizon = min(kd_horizon, t_ans).
             Default: None
-        kd_loss_type (str): KL divergence estimator for OPD.
-            Options: "k1" (logprob diff), "k2" (MSE, recommended), "k3" (low-variance estimator).
-            Default: "k2"
         teacher_server_ip (Optional[str]): IP address of teacher server (for client-server mode).
             If None, falls back to using reference policy on same GPUs (not recommended).
             Default: None
@@ -118,10 +111,8 @@ class OPDConfig(BaseConfig):
     warmup_steps: int = 0
     pass_rate_threshold: float = 0.1
     kd_horizon: int = 512
-    kd_coef: float = 0.1
     stop_before_answer_tokens: bool = True
     answer_token_ids: Optional[list[int]] = None
-    kd_loss_type: str = "k2"
     # Teacher server configuration (for client-server architecture)
     teacher_server_ip: Optional[str] = None
     teacher_server_port: int = 15555
