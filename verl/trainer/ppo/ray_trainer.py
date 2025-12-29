@@ -1647,6 +1647,51 @@ class RayPPOTrainer:
                             config=self.config.algorithm,
                         )
 
+                    # Replace advantages with OPD rewards for hard prompts (pass_rate < threshold)
+                    # Easy prompts use RL rewards, hard prompts use teacher guidance
+                    opd_config = self.config.algorithm.get("opd", None)
+                    if (
+                        opd_config is not None
+                        and opd_config.get("enable", False)
+                        and "teacher_log_probs" in batch.batch
+                        and "opd_eligibility_mask" in batch.batch
+                    ):
+                        opd_eligibility_mask = batch.batch["opd_eligibility_mask"]  # [batch_size]
+                        num_eligible = opd_eligibility_mask.sum().item()
+
+                        if num_eligible > 0:
+                            # Get teacher and student logprobs
+                            teacher_log_probs = batch.batch["teacher_log_probs"]  # [batch_size, prompt_len + response_len]
+                            student_log_probs = batch.batch["old_log_probs"]  # [batch_size, response_len]
+
+                            # Slice teacher logprobs to response-only
+                            prompt_len = batch.batch["prompts"].shape[1]
+                            teacher_log_probs_response = teacher_log_probs[:, prompt_len:]  # [batch_size, response_len]
+
+                            # Compute K1 KL divergence (student || teacher)
+                            # K1: student_logprob - teacher_logprob (simple difference, stable)
+                            kl = student_log_probs - teacher_log_probs_response  # [batch_size, response_len]
+
+                            # Create OPD advantages: negative KL (minimize KL = match teacher)
+                            # Apply horizon masking to focus on thinking tokens
+                            opd_horizon_mask = batch.batch["opd_horizon_mask"]  # [batch_size, response_len]
+                            opd_advantages = -kl * opd_horizon_mask  # [batch_size, response_len]
+
+                            # Replace RL advantages with OPD advantages for eligible samples
+                            # This creates a clean split: easy prompts → RL, hard prompts → teacher guidance
+                            opd_eligibility_expanded = opd_eligibility_mask.unsqueeze(-1).expand_as(
+                                batch.batch["advantages"]
+                            )
+                            batch.batch["advantages"] = torch.where(
+                                opd_eligibility_expanded.bool(),
+                                opd_advantages,  # Hard prompts: pure teacher guidance
+                                batch.batch["advantages"],  # Easy prompts: pure RL rewards
+                            )
+
+                            print(
+                                f"[OPD] Replaced advantages for {num_eligible}/{opd_eligibility_mask.shape[0]} hard prompts with teacher guidance"
+                            )
+
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
@@ -1656,12 +1701,6 @@ class RayPPOTrainer:
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
-                        # Debug: Check if teacher_log_probs is still in batch before update_actor
-                        if "teacher_log_probs" in batch.batch:
-                            print(f"[OPD DEBUG] teacher_log_probs PRESENT before update_actor, shape={batch.batch['teacher_log_probs'].shape}")
-                        else:
-                            print("[OPD DEBUG] teacher_log_probs MISSING before update_actor")
-
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
