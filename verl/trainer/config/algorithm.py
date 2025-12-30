@@ -75,6 +75,14 @@ class OPDConfig(BaseConfig):
 
     Args:
         enable (bool): Whether to enable OPD. Default: False.
+        opd_mode (str): How to apply OPD teacher guidance. Options:
+            - "advantage": Replace RL advantages with teacher guidance for hard prompts (V2, recommended).
+              Uses K1 estimator (simple logprob difference). No coefficient balancing needed.
+              Clean split: easy prompts → RL rewards, hard prompts → teacher guidance.
+            - "loss": Add teacher KL loss as separate term to policy loss (V1, legacy).
+              Uses configurable KL estimator (K1/K2/K3). Requires careful coefficient tuning.
+              RL and teacher signals can conflict, less stable.
+            Default: "advantage"
         warmup_steps (int): Number of pure RL steps before enabling OPD (Phase 1).
             This allows the model to stabilize and fix format issues before applying teacher guidance.
             Default: 0 (no warmup, OPD enabled from start).
@@ -85,9 +93,20 @@ class OPDConfig(BaseConfig):
             - 0.3: When ≥70% fail (balanced)
             - 0.5: When majority fails (liberal)
             Default: 0.1
-        kd_horizon (int): Maximum number of tokens to apply KD guidance via advantage replacement.
+        kd_horizon (int): Maximum number of tokens to apply KD guidance.
             Primarily targets thinking tokens; stops before answer to prevent importing teacher's
             final answer style. Default: 512
+        kd_coef (float): Coefficient for teacher guidance.
+            - In ADVANTAGE mode: Scales teacher advantages to match RL advantage magnitude.
+              Balance between easy prompts (RL) and hard prompts (teacher).
+              Start with 1.0 and adjust if hard prompts dominate/underperform.
+            - In LOSS mode: Coefficient for KD loss term added to policy loss.
+              Start small (0.01-0.05) to avoid instability.
+            Default: 1.0
+        kd_loss_type (str): [LOSS MODE ONLY] KL divergence estimator for OPD.
+            Options: "k1" (logprob diff), "k2" (MSE), "k3" (low-variance).
+            Unused in advantage mode (always uses K1).
+            Default: "k2"
         stop_before_answer_tokens (bool): Whether to stop KD before answer tokens.
             If True and answer_token_ids provided, KD stops at first answer token appearance.
             This ensures we only distill thinking process, not answer formatting.
@@ -108,9 +127,12 @@ class OPDConfig(BaseConfig):
     """
 
     enable: bool = False
+    opd_mode: str = "advantage"  # "advantage" or "loss"
     warmup_steps: int = 0
     pass_rate_threshold: float = 0.1
     kd_horizon: int = 512
+    kd_coef: float = 1.0  # Advantage mode: scale teacher advantages; Loss mode: start at 0.01-0.05
+    kd_loss_type: str = "k2"  # Only used in loss mode
     stop_before_answer_tokens: bool = True
     answer_token_ids: Optional[list[int]] = None
     # Teacher server configuration (for client-server architecture)

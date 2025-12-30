@@ -1647,12 +1647,13 @@ class RayPPOTrainer:
                             config=self.config.algorithm,
                         )
 
-                    # Replace advantages with OPD rewards for hard prompts (pass_rate < threshold)
+                    # Replace advantages with OPD rewards for hard prompts (ADVANTAGE MODE ONLY)
                     # Easy prompts use RL rewards, hard prompts use teacher guidance
                     opd_config = self.config.algorithm.get("opd", None)
                     if (
                         opd_config is not None
                         and opd_config.get("enable", False)
+                        and opd_config.get("opd_mode", "advantage") == "advantage"  # Only in advantage mode
                         and "teacher_log_probs" in batch.batch
                         and "opd_eligibility_mask" in batch.batch
                     ):
@@ -1673,18 +1674,20 @@ class RayPPOTrainer:
                             kl = student_log_probs - teacher_log_probs_response  # [batch_size, response_len]
 
                             # Create OPD advantages: negative KL (minimize KL = match teacher)
-                            # Apply horizon masking to focus on thinking tokens
+                            # Apply horizon masking and coefficient to balance with RL advantages
                             opd_horizon_mask = batch.batch["opd_horizon_mask"]  # [batch_size, response_len]
-                            opd_advantages = -kl * opd_horizon_mask  # [batch_size, response_len]
+                            opd_kd_coef = opd_config.get("kd_coef", 1.0)  # Scale teacher advantages
+                            opd_advantages = -kl * opd_horizon_mask * opd_kd_coef  # [batch_size, response_len]
 
                             # Replace RL advantages with OPD advantages for eligible samples
                             # This creates a clean split: easy prompts → RL, hard prompts → teacher guidance
+                            # Coefficient ensures balanced learning between easy and hard prompts
                             opd_eligibility_expanded = opd_eligibility_mask.unsqueeze(-1).expand_as(
                                 batch.batch["advantages"]
                             )
                             batch.batch["advantages"] = torch.where(
                                 opd_eligibility_expanded.bool(),
-                                opd_advantages,  # Hard prompts: pure teacher guidance
+                                opd_advantages,  # Hard prompts: scaled teacher guidance
                                 batch.batch["advantages"],  # Easy prompts: pure RL rewards
                             )
 
