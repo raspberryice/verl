@@ -451,6 +451,13 @@ class DataParallelPPOActor(BasePPOActor):
                 for micro_batch in micro_batches:
                     micro_batch = micro_batch.to(get_device_id())
                     micro_batch_metrics = {}
+
+                    # Initialize default values for conditional OPD metrics to ensure homogeneous shapes
+                    # This prevents ValueError when reducing metrics across micro-batches
+                    micro_batch_metrics["actor/opd/kl_loss"] = 0.0
+                    micro_batch_metrics["actor/opd/num_eligible_samples"] = 0.0
+                    micro_batch_metrics["actor/opd/frac_tokens_with_kd"] = 0.0
+
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                     response_mask = model_inputs["response_mask"]
                     old_log_prob = model_inputs["old_log_probs"]
@@ -580,7 +587,6 @@ class DataParallelPPOActor(BasePPOActor):
 
                             # Log OPD metrics
                             micro_batch_metrics["actor/opd/kl_loss"] = opd_kl_loss.detach().item() * loss_scale_factor
-                            micro_batch_metrics["actor/opd/kd_coef"] = float(opd_kd_coef)
                             micro_batch_metrics["actor/opd/num_eligible_samples"] = num_eligible
 
                             # Compute fraction of tokens receiving KD
