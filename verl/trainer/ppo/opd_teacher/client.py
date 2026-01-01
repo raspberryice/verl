@@ -38,16 +38,26 @@ class OPDTeacherClient:
     full log probabilities for student-generated sequences. Unlike GKD which uses top-k
     logprobs, this returns complete log probability distributions for reverse KL computation.
 
+    Supports custom teacher prompts to give the teacher different context/instructions
+    while evaluating the student's response tokens.
+
     Args:
         server_ip (str): IP address of the teacher server
         server_port (int): Port number of the teacher server
         num_microbatches (int): Number of microbatches to process per request (default: 1)
         n_server_workers (int): Number of parallel server workers (default: 1)
         timeout_ms (int): Timeout for server responses in milliseconds (default: 600000 = 10min)
+        teacher_prompt (str, optional): Custom prompt template for teacher. Use {prompt} as
+            placeholder for original prompt. Example:
+            "You are an expert teacher. Provide detailed reasoning.\n\n{prompt}"
 
     Example:
-        >>> client = OPDTeacherClient(server_ip="10.0.0.1", server_port=15555)
-        >>> future = client.submit(input_ids_list, attention_mask_list)
+        >>> client = OPDTeacherClient(
+        ...     server_ip="10.0.0.1",
+        ...     server_port=15555,
+        ...     teacher_prompt="You are an expert teacher.\n\n{prompt}"
+        ... )
+        >>> future = client.submit(input_ids_list, attention_mask_list, prompt_lengths_list)
         >>> teacher_logprobs = future.result()  # [batch_size, seq_len, vocab_size]
     """
 
@@ -58,12 +68,14 @@ class OPDTeacherClient:
         num_microbatches: int = 1,
         n_server_workers: int = 1,
         timeout_ms: int = 600000,
+        teacher_prompt: str = None,
     ) -> None:
         self.server_ip = server_ip
         self.server_port = server_port
         self.num_microbatches = num_microbatches
         self.n_server_workers = n_server_workers
         self.timeout_ms = timeout_ms
+        self.teacher_prompt = teacher_prompt
 
         self.task_queue = queue.Queue()
         self.mutex = threading.Lock() if n_server_workers > 1 else nullcontext()
@@ -90,21 +102,30 @@ class OPDTeacherClient:
             futures = []
             batch_input_ids = []
             batch_attention_mask = []
+            batch_prompt_lengths = []
 
             try:
                 with self.mutex:
                     # Collect microbatches
                     for _ in range(self.num_microbatches):
-                        future, input_ids, attention_mask = self.task_queue.get()
+                        future, input_ids, attention_mask, prompt_lengths = self.task_queue.get()
                         futures.append(future)
                         batch_input_ids.extend(input_ids)
                         batch_attention_mask.extend(attention_mask)
+                        if prompt_lengths is not None:
+                            batch_prompt_lengths.extend(prompt_lengths)
 
                 # Prepare request
                 request = {
                     "input_ids": batch_input_ids,
                     "attention_mask": batch_attention_mask,
                 }
+
+                # Add optional parameters
+                if batch_prompt_lengths:
+                    request["prompt_lengths"] = batch_prompt_lengths
+                if self.teacher_prompt is not None:
+                    request["teacher_prompt"] = self.teacher_prompt
 
                 # Send request to teacher server
                 socket.send(serialize(request))
@@ -159,19 +180,21 @@ class OPDTeacherClient:
         for _ in range(self.n_server_workers):
             threading.Thread(target=self.bg_task, daemon=True).start()
 
-    def submit(self, input_ids: list, attention_mask: list) -> Future:
+    def submit(self, input_ids: list, attention_mask: list, prompt_lengths: list = None) -> Future:
         """Submit a request to the teacher server for log probability computation.
 
         Args:
             input_ids (list): List of input ID sequences (each is a list of ints)
             attention_mask (list): List of attention masks (each is a list of ints/bools)
+            prompt_lengths (list, optional): List of prompt lengths for each sequence.
+                Required when using custom teacher prompts.
 
         Returns:
             Future: Future object that will contain teacher log probabilities
                    Result will be a list of tensors [batch_size, seq_len, vocab_size]
         """
         future = Future()
-        self.task_queue.put((future, input_ids, attention_mask))
+        self.task_queue.put((future, input_ids, attention_mask, prompt_lengths))
         return future
 
     def __del__(self):

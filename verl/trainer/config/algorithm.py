@@ -66,6 +66,7 @@ class OPDConfig(BaseConfig):
     difficult problems while avoiding length inflation on easy problems. It uses:
     1. Per-prompt pass rate gating: Only apply OPD to prompts with low pass rates
     2. Per-sample failure gating: Within underperforming prompts, only distill failed rollouts
+       (unless apply_to_all_rollouts=True for pure OPD baselines)
     3. Horizon masking: Limit KD to thinking tokens (stop before answer to prevent style drift)
 
     The KL divergence is computed with student policy as p and teacher policy as q, sampled from
@@ -87,12 +88,19 @@ class OPDConfig(BaseConfig):
             This allows the model to stabilize and fix format issues before applying teacher guidance.
             Default: 0 (no warmup, OPD enabled from start).
         pass_rate_threshold (float): Pass rate threshold for per-prompt gating.
-            Only apply OPD to prompts with pass_rate < threshold.
-            - 0.0: Only when all rollouts fail (very strict)
-            - 0.1: When ≥90% fail (strict, recommended starting point)
-            - 0.3: When ≥70% fail (balanced)
-            - 0.5: When majority fails (liberal)
+            Only apply OPD to prompts with pass_rate <= threshold.
+            - 0.0: Only when all rollouts fail (pass_rate = 0)
+            - 0.1: When ≥90% fail (pass_rate ≤ 0.1)
+            - 0.3: When ≥70% fail (pass_rate ≤ 0.3)
+            - 0.5: When majority fails (pass_rate ≤ 0.5)
+            - 1.0: Apply to all prompts including those with 100% success (for pure OPD baselines)
             Default: 0.1
+        apply_to_all_rollouts (bool): Whether to apply OPD to all rollouts or only failed ones.
+            - False (default): Standard OPD - only apply to failed rollouts (R=0) of underperforming prompts.
+              This balances teacher guidance with RL exploration.
+            - True: Pure OPD - apply to all rollouts of eligible prompts, regardless of success/failure.
+              Use with pass_rate_threshold=1.0 for pure teacher imitation (no RL).
+            Default: False
         kd_horizon (int): Maximum number of tokens to apply KD guidance.
             Primarily targets thinking tokens; stops before answer to prevent importing teacher's
             final answer style. Default: 512
@@ -124,12 +132,18 @@ class OPDConfig(BaseConfig):
             Default: 1
         teacher_timeout_ms (int): Timeout for teacher server responses in milliseconds.
             Default: 600000 (10 minutes)
+        teacher_prompt (Optional[str]): Custom prompt template for teacher model.
+            If provided, the original student prompt will be wrapped with this template.
+            Use {prompt} as placeholder for the original prompt text.
+            Example: "You are an expert math teacher. Provide detailed step-by-step reasoning.\n\n{prompt}"
+            Default: None (teacher sees same prompt as student)
     """
 
     enable: bool = False
     opd_mode: str = "advantage"  # "advantage" or "loss"
     warmup_steps: int = 0
     pass_rate_threshold: float = 0.1
+    apply_to_all_rollouts: bool = False  # If True, apply OPD to all rollouts (not just failed ones)
     kd_horizon: int = 512
     kd_coef: float = 1.0  # Advantage mode: scale teacher advantages; Loss mode: start at 0.01-0.05
     kd_loss_type: str = "k2"  # Only used in loss mode
@@ -140,6 +154,7 @@ class OPDConfig(BaseConfig):
     teacher_server_port: int = 15555
     teacher_n_workers: int = 1
     teacher_timeout_ms: int = 600000
+    teacher_prompt: Optional[str] = None
 
 
 @dataclass

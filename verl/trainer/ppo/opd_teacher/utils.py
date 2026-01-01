@@ -55,8 +55,12 @@ def get_teacher_logprobs(batch: DataProto, teacher_client, n_server_workers: int
     the teacher server, and receives full log probability distributions for computing
     reverse KL divergence.
 
+    Supports custom teacher prompts: if the teacher_client has a teacher_prompt set,
+    the prompt boundaries will be extracted and sent to allow the teacher to see
+    different context while evaluating the student's response.
+
     Args:
-        batch (DataProto): Input batch containing input_ids and attention_mask
+        batch (DataProto): Input batch containing input_ids, attention_mask, and optionally prompt_ids
         teacher_client: OPDTeacherClient instance for server communication
         n_server_workers (int): Number of parallel workers for teacher inference
         is_async (bool): Whether to use asynchronous processing
@@ -84,6 +88,40 @@ def get_teacher_logprobs(batch: DataProto, teacher_client, n_server_workers: int
     for mask in attention_mask_bool:
         attention_masks.append(mask.tolist())
 
+    # Extract prompt lengths if custom teacher prompt is used
+    prompt_lengths = None
+    if hasattr(teacher_client, "teacher_prompt") and teacher_client.teacher_prompt is not None:
+        # Try to get prompt_ids from batch to determine prompt length
+        if "prompt_ids" in batch.batch:
+            prompt_ids = batch.batch["prompt_ids"]
+            prompt_lengths = []
+            for prompt_id_seq in prompt_ids:
+                # Count non-padding tokens in prompt
+                # Assume padding is 0 or we can use attention mask
+                prompt_len = (prompt_id_seq != 0).sum().item()
+                prompt_lengths.append(prompt_len)
+        else:
+            # Fallback: try to infer from response_ids if available
+            if "response_ids" in batch.batch:
+                response_ids = batch.batch["response_ids"]
+                prompt_lengths = []
+                for full_seq, response_seq in zip(batch.batch["input_ids"], response_ids):
+                    # prompt_length = total_length - response_length
+                    total_len = (full_seq != 0).sum().item()
+                    response_len = (response_seq != 0).sum().item()
+                    prompt_len = total_len - response_len
+                    prompt_lengths.append(prompt_len)
+            else:
+                # Cannot determine prompt boundaries, log warning
+                import logging
+
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    "teacher_prompt is set but cannot determine prompt boundaries. "
+                    "Batch does not contain 'prompt_ids' or 'response_ids'. "
+                    "Teacher will see same prompt as student."
+                )
+
     all_teacher_logprobs = []
     batch_size = len(input_ids)
 
@@ -101,9 +139,15 @@ def get_teacher_logprobs(batch: DataProto, teacher_client, n_server_workers: int
 
     # Submit requests to teacher server
     for i in range(0, batch_size, micro_batch_size):
+        # Extract prompt_lengths slice if available
+        batch_prompt_lengths = None
+        if prompt_lengths is not None:
+            batch_prompt_lengths = prompt_lengths[i : i + micro_batch_size]
+
         fut = teacher_client.submit(
             input_ids=input_ids[i : i + micro_batch_size],
             attention_mask=attention_masks[i : i + micro_batch_size],
+            prompt_lengths=batch_prompt_lengths,
         )
         fut.add_done_callback(cb)
         futures.append(fut)

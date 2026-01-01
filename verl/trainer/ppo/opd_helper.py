@@ -93,13 +93,14 @@ def create_opd_eligibility_mask(
     threshold: float = 0.3,
     n_samples_per_prompt: int = 8,
     reward_key: str = "token_level_scores",
+    apply_to_all_rollouts: bool = False,
 ) -> torch.Tensor:
     """
     Create per-sample binary mask indicating which rollouts should receive OPD.
 
-    OPD eligibility criteria (both must be satisfied):
-    1. Prompt-level: pass_rate(x) < threshold (prompt is underperforming)
-    2. Sample-level: R_i = 0 (this specific rollout failed)
+    OPD eligibility criteria:
+    1. Prompt-level: pass_rate(x) <= threshold (prompt is underperforming)
+    2. Sample-level (if apply_to_all_rollouts=False): R_i = 0 (this specific rollout failed)
 
     Args:
         batch: DataProto containing rollout data
@@ -107,33 +108,32 @@ def create_opd_eligibility_mask(
         threshold: Pass rate threshold (e.g., 0.3 = apply OPD when ≥70% fail)
         n_samples_per_prompt: Number of rollout samples per prompt
         reward_key: Key in batch.batch containing rewards
+        apply_to_all_rollouts: If True, apply OPD to all rollouts of eligible prompts (ignore success/failure).
+                               If False, only apply to failed rollouts. Default: False.
+                               Set to True for pure OPD baselines where all rollouts should use teacher guidance.
 
     Returns:
         opd_mask: Binary mask of shape [batch_size] where 1 = eligible for OPD
 
-    Example:
+    Example (apply_to_all_rollouts=False):
         threshold = 0.3, n = 4
-        prompt 0: pass_rate = 0.25 (< 0.3) → underperforming
+        prompt 0: pass_rate = 0.25 (≤ 0.3) → underperforming
             rollout 0: reward = 0 → eligible (mask = 1)
             rollout 1: reward = 1 → not eligible (mask = 0, correct solution)
             rollout 2: reward = 0 → eligible (mask = 1)
             rollout 3: reward = 0 → eligible (mask = 1)
         prompt 1: pass_rate = 0.75 (> 0.3) → performing well
             rollout 4-7: all get mask = 0 (regardless of individual success)
+
+    Example (apply_to_all_rollouts=True):
+        threshold = 0.3, n = 4
+        prompt 0: pass_rate = 0.25 (≤ 0.3) → underperforming
+            rollout 0-3: all eligible (mask = 1, regardless of reward)
+        prompt 1: pass_rate = 0.75 (> 0.3) → performing well
+            rollout 4-7: all get mask = 0
     """
-    # Get per-rollout success (same logic as compute_prompt_pass_rates)
-    token_level_rewards = batch.batch[reward_key]
-    response_mask = batch.batch.get("response_mask", None)
-
-    if response_mask is not None:
-        rollout_rewards = (token_level_rewards * response_mask).sum(dim=-1)
-    else:
-        rollout_rewards = token_level_rewards.sum(dim=-1)
-
-    rollout_failed = (rollout_rewards <= 0).float()  # [batch_size], 1 = failed
-
     # Determine which prompts are underperforming
-    prompt_underperforming = (pass_rates < threshold).float()  # [num_prompts], 1 = underperforming
+    prompt_underperforming = (pass_rates <= threshold).float()  # [num_prompts], 1 = underperforming
 
     # Expand to per-rollout: repeat each prompt decision n_samples_per_prompt times
     num_prompts = pass_rates.shape[0]
@@ -142,8 +142,24 @@ def create_opd_eligibility_mask(
     # Repeat interleaved: [p0, p0, p0, p1, p1, p1, ...]
     prompt_underperforming_expanded = prompt_underperforming.repeat_interleave(n_samples_per_prompt)  # [batch_size]
 
-    # OPD mask: underperforming prompt AND failed rollout
-    opd_mask = prompt_underperforming_expanded * rollout_failed  # [batch_size]
+    if apply_to_all_rollouts:
+        # Pure OPD: Apply to all rollouts of underperforming prompts
+        opd_mask = prompt_underperforming_expanded  # [batch_size]
+    else:
+        # Standard OPD: Apply only to failed rollouts of underperforming prompts
+        # Get per-rollout success (same logic as compute_prompt_pass_rates)
+        token_level_rewards = batch.batch[reward_key]
+        response_mask = batch.batch.get("response_mask", None)
+
+        if response_mask is not None:
+            rollout_rewards = (token_level_rewards * response_mask).sum(dim=-1)
+        else:
+            rollout_rewards = token_level_rewards.sum(dim=-1)
+
+        rollout_failed = (rollout_rewards <= 0).float()  # [batch_size], 1 = failed
+
+        # OPD mask: underperforming prompt AND failed rollout
+        opd_mask = prompt_underperforming_expanded * rollout_failed  # [batch_size]
 
     return opd_mask
 

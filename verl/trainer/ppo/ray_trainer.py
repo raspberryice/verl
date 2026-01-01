@@ -337,12 +337,18 @@ class RayPPOTrainer:
             if teacher_ip is not None:
                 from verl.trainer.ppo.opd_teacher import OPDTeacherClient
 
-                print(f"[OPD] Initializing teacher client: {teacher_ip}:{teacher_port}")
+                teacher_prompt = opd_config.get("teacher_prompt", None)
+                if teacher_prompt:
+                    print(f"[OPD] Initializing teacher client with custom prompt: {teacher_ip}:{teacher_port}")
+                    print(f"[OPD] Teacher prompt: {teacher_prompt[:100]}...")
+                else:
+                    print(f"[OPD] Initializing teacher client: {teacher_ip}:{teacher_port}")
                 self.teacher_client = OPDTeacherClient(
                     server_ip=teacher_ip,
                     server_port=teacher_port,
                     n_server_workers=opd_config.get("teacher_n_workers", 1),
                     timeout_ms=opd_config.get("teacher_timeout_ms", 600000),
+                    teacher_prompt=teacher_prompt,
                 )
                 print("[OPD] Teacher client initialized successfully")
             else:
@@ -1561,13 +1567,14 @@ class RayPPOTrainer:
                                     batch, n_samples_per_prompt=n_samples_per_prompt, reward_key="token_level_scores"
                                 )
 
-                                # Create OPD eligibility mask: pass_rate < θ AND R_i = 0
+                                # Create OPD eligibility mask: pass_rate < θ [AND R_i = 0 if not apply_to_all_rollouts]
                                 opd_eligibility_mask = create_opd_eligibility_mask(
                                     batch,
                                     pass_rates=pass_rates,
                                     threshold=opd_config.get("pass_rate_threshold", 0.1),
                                     n_samples_per_prompt=n_samples_per_prompt,
                                     reward_key="token_level_scores",
+                                    apply_to_all_rollouts=opd_config.get("apply_to_all_rollouts", False),
                                 )
 
                                 # Create horizon mask: stop KD before answer tokens

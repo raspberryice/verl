@@ -101,21 +101,40 @@ class OPDTeacherServer:
             else:
                 raise
 
-    def compute_logprobs(self, input_ids: list[list[int]], attention_mask: list[list[int]]) -> list[torch.Tensor]:
+    def compute_logprobs(
+        self,
+        input_ids: list[list[int]],
+        attention_mask: list[list[int]],
+        prompt_lengths: list[int] = None,
+        teacher_prompt: str = None,
+    ) -> list[torch.Tensor]:
         """Compute log probabilities for the tokens in each sequence using vLLM.
 
         For K2 KL estimator, we only need the teacher's logprob of each token given its context.
 
+        Supports custom teacher prompts: if teacher_prompt is provided, the original student
+        prompt will be replaced with a custom teacher prompt, while keeping the student's
+        response tokens unchanged.
+
         Args:
             input_ids (list[list[int]]): List of input ID sequences (student's generated sequences)
             attention_mask (list[list[int]]): List of attention masks
+            prompt_lengths (list[int], optional): Length of prompt portion for each sequence.
+                Required if teacher_prompt is provided.
+            teacher_prompt (str, optional): Custom prompt template for teacher. Use {prompt}
+                as placeholder for original prompt text. Example:
+                "You are an expert teacher. Provide detailed reasoning.\n\n{prompt}"
 
         Returns:
-            list[torch.Tensor]: List of log probability tensors, each of shape [seq_len-1]
-                                (logprob of each token given previous context)
+            list[torch.Tensor]: List of log probability tensors, each of shape [response_len-1]
+                                (logprob of each response token given previous context)
         """
         batch_size = len(input_ids)
         all_logprobs = []
+
+        # Validate inputs
+        if teacher_prompt is not None and prompt_lengths is None:
+            raise ValueError("prompt_lengths is required when teacher_prompt is provided")
 
         # Process each sequence
         for i in range(batch_size):
@@ -132,6 +151,36 @@ class OPDTeacherServer:
                 # Need at least 2 tokens to compute logprobs (input -> prediction)
                 all_logprobs.append(torch.zeros(0, dtype=torch.float32))
                 continue
+
+            # Handle custom teacher prompt if provided
+            if teacher_prompt is not None:
+                prompt_len = prompt_lengths[i]
+
+                # Extract original prompt and response
+                original_prompt_ids = valid_ids[:prompt_len]
+                response_ids = valid_ids[prompt_len:]
+
+                # Decode original prompt
+                original_prompt_text = self.tokenizer.decode(original_prompt_ids, skip_special_tokens=False)
+
+                # Apply teacher prompt template
+                if "{prompt}" in teacher_prompt:
+                    new_prompt_text = teacher_prompt.replace("{prompt}", original_prompt_text)
+                else:
+                    # If no placeholder, just prepend teacher prompt
+                    new_prompt_text = teacher_prompt + original_prompt_text
+
+                # Re-tokenize with teacher's tokenizer
+                new_prompt_ids = self.tokenizer.encode(new_prompt_text, add_special_tokens=False)
+
+                # Concatenate teacher prompt + student response
+                valid_ids = new_prompt_ids + response_ids
+
+                # Store response start position for later extraction
+                response_start_pos = len(new_prompt_ids)
+            else:
+                # No custom prompt, response starts after original prompt
+                response_start_pos = prompt_lengths[i] if prompt_lengths is not None else 0
 
             try:
                 # Use vLLM to compute prompt logprobs
@@ -177,7 +226,19 @@ class OPDTeacherServer:
                     else:
                         token_logprobs.append(0.0)
 
-                all_logprobs.append(torch.tensor(token_logprobs, dtype=torch.float32))
+                # If using custom teacher prompt, extract only response logprobs
+                if teacher_prompt is not None and response_start_pos > 0:
+                    # Extract logprobs for response tokens only
+                    # response_start_pos is where response begins in the modified sequence
+                    # We want logprobs from position response_start_pos onwards
+                    # Since token_logprobs[i] is logprob of token[i+1], we need indices [response_start_pos-1:]
+                    if response_start_pos > 0 and response_start_pos <= len(token_logprobs):
+                        response_logprobs = token_logprobs[response_start_pos - 1 :]
+                    else:
+                        response_logprobs = token_logprobs
+                    all_logprobs.append(torch.tensor(response_logprobs, dtype=torch.float32))
+                else:
+                    all_logprobs.append(torch.tensor(token_logprobs, dtype=torch.float32))
 
             except Exception as e:
                 logger.error(f"Error computing logprobs for sequence {i}: {e}")
@@ -202,6 +263,8 @@ class OPDTeacherServer:
                 # Extract input_ids and attention_mask
                 input_ids = request.get("input_ids")
                 attention_mask = request.get("attention_mask")
+                prompt_lengths = request.get("prompt_lengths")
+                teacher_prompt = request.get("teacher_prompt")
 
                 if input_ids is None or attention_mask is None:
                     response = {"status": "error", "reason": "Missing input_ids or attention_mask"}
@@ -209,8 +272,13 @@ class OPDTeacherServer:
                     continue
 
                 # Compute logprobs
-                logger.info(f"Computing logprobs for {len(input_ids)} sequences")
-                logprobs = self.compute_logprobs(input_ids, attention_mask)
+                if teacher_prompt is not None:
+                    logger.info(
+                        f"Computing logprobs for {len(input_ids)} sequences with custom teacher prompt"
+                    )
+                else:
+                    logger.info(f"Computing logprobs for {len(input_ids)} sequences")
+                logprobs = self.compute_logprobs(input_ids, attention_mask, prompt_lengths, teacher_prompt)
 
                 # Send response
                 response = {"status": "success", "logprobs": logprobs}
