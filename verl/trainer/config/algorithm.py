@@ -115,6 +115,15 @@ class OPDConfig(BaseConfig):
             Options: "k1" (logprob diff), "k2" (MSE), "k3" (low-variance).
             Unused in advantage mode (always uses K1).
             Default: "k2"
+        kd_clip_ratio (Optional[float]): [LOSS MODE ONLY] Clipping ratio for teacher/student probability ratio.
+            Similar to PPO's clip_ratio, prevents teacher from dominating when highly confident.
+            Applied before KL computation: ratio = exp(teacher_log_prob - student_log_prob)
+            clipped_ratio = clamp(ratio, 1 - kd_clip_ratio, 1 + kd_clip_ratio)
+            - None: No clipping (can be unstable when teacher and student diverge)
+            - 0.2: Conservative clipping (similar to PPO default)
+            - 0.5: Moderate clipping
+            - 1.0: Loose clipping
+            Default: None
         stop_before_answer_tokens (bool): Whether to stop KD before answer tokens.
             If True and answer_token_ids provided, KD stops at first answer token appearance.
             This ensures we only distill thinking process, not answer formatting.
@@ -147,6 +156,7 @@ class OPDConfig(BaseConfig):
     kd_horizon: int = 512
     kd_coef: float = 1.0  # Advantage mode: scale teacher advantages; Loss mode: start at 0.01-0.05
     kd_loss_type: str = "k2"  # Only used in loss mode
+    kd_clip_ratio: Optional[float] = None  # Loss mode only: clip teacher/student ratio for stability
     stop_before_answer_tokens: bool = True
     answer_token_ids: Optional[list[int]] = None
     # Teacher server configuration (for client-server architecture)

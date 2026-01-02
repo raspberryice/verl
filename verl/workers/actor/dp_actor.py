@@ -457,6 +457,7 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batch_metrics["actor/opd/kl_loss"] = 0.0
                     micro_batch_metrics["actor/opd/num_eligible_samples"] = 0.0
                     micro_batch_metrics["actor/opd/frac_tokens_with_kd"] = 0.0
+                    micro_batch_metrics["actor/opd/clipfrac"] = 0.0
 
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                     response_mask = model_inputs["response_mask"]
@@ -565,10 +566,26 @@ class DataParallelPPOActor(BasePPOActor):
                             prompt_len = model_inputs["prompts"].shape[1]
                             teacher_log_probs_response = teacher_log_probs[:, prompt_len:]  # [batch_size, response_len]
 
+                            # Apply ratio clipping if configured (similar to PPO clip_ratio)
+                            # Prevents teacher from dominating when student and teacher diverge significantly
+                            kd_clip_ratio = opd_config.get("kd_clip_ratio", None)
+                            if kd_clip_ratio is not None:
+                                # Compute ratio: teacher_prob / student_prob = exp(teacher_log_prob - student_log_prob)
+                                log_ratio = teacher_log_probs_response - log_prob  # [batch_size, response_len]
+                                # Clamp log_ratio for numerical stability before exp
+                                log_ratio = torch.clamp(log_ratio, min=-20.0, max=20.0)
+                                ratio = torch.exp(log_ratio)
+                                # Apply clipping: ratio ∈ [1 - clip_ratio, 1 + clip_ratio]
+                                ratio_clipped = torch.clamp(ratio, 1.0 - kd_clip_ratio, 1.0 + kd_clip_ratio)
+                                # Convert back to log space for KL computation
+                                teacher_log_probs_response_clipped = log_prob + torch.log(ratio_clipped)
+                            else:
+                                teacher_log_probs_response_clipped = teacher_log_probs_response
+
                             # Compute KL divergence (student || teacher) using configured estimator
                             kld_opd = kl_penalty(
                                 logprob=log_prob,
-                                ref_logprob=teacher_log_probs_response,
+                                ref_logprob=teacher_log_probs_response_clipped,
                                 kl_penalty=opd_config.get("kd_loss_type", "k2"),
                             )
 
@@ -595,6 +612,13 @@ class DataParallelPPOActor(BasePPOActor):
                             micro_batch_metrics["actor/opd/frac_tokens_with_kd"] = (
                                 opd_tokens / total_response_tokens if total_response_tokens > 0 else 0.0
                             )
+
+                            # Log clipping statistics if clipping was applied
+                            if kd_clip_ratio is not None:
+                                # Compute fraction of OPD tokens that were clipped
+                                clipped = (ratio != ratio_clipped).float() * opd_combined_mask  # Only count in KD region
+                                opd_clipfrac = clipped.sum().item() / opd_tokens if opd_tokens > 0 else 0.0
+                                micro_batch_metrics["actor/opd/clipfrac"] = opd_clipfrac
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
