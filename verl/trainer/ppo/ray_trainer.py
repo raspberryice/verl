@@ -948,6 +948,39 @@ class RayPPOTrainer:
         self.actor_rollout_wg = all_wg[str(actor_role)]
         self.actor_rollout_wg.init_model()
 
+        # Inject actor_forward_fn into StepProgressRewardManager if needed
+        from verl.workers.reward_manager.step_progress_reward import StepProgressRewardManager
+        if isinstance(self.reward_fn, StepProgressRewardManager):
+            def actor_forward_fn(input_ids, attention_mask):
+                """Compute log probs for input sequences using actor model.
+
+                IMPORTANT: Detaches outputs to prevent gradient backpropagation.
+                V(prefix) estimation is for reward computation only, not for training gradients.
+                """
+                # Use actor worker group's compute_log_prob method
+                log_prob_output = self.actor_rollout_wg.compute_log_prob(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask
+                )
+
+                # Detach all tensors in the output to prevent gradient flow
+                if isinstance(log_prob_output, dict):
+                    detached_output = {}
+                    for key, value in log_prob_output.items():
+                        if isinstance(value, torch.Tensor):
+                            detached_output[key] = value.detach()
+                        else:
+                            detached_output[key] = value
+                    return detached_output
+                elif isinstance(log_prob_output, torch.Tensor):
+                    return log_prob_output.detach()
+                else:
+                    return log_prob_output
+
+            # Inject the function into the reward manager
+            self.reward_fn.actor_forward_fn = actor_forward_fn
+            print("[StepProgressReward] Injected actor_forward_fn into reward manager")
+
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
 
