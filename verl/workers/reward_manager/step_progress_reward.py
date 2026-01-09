@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 # Add reward_functions to path if not already there
-reward_functions_path = Path(__file__).parent.parent.parent.parent / "reward_functions"
+reward_functions_path = Path(__file__).parent.parent.parent.parent.parent / "reward_functions"
 if str(reward_functions_path) not in sys.path:
     sys.path.insert(0, str(reward_functions_path))
 
