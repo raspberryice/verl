@@ -607,6 +607,7 @@ class RayPPOTrainer:
     def _validate(self):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
+        aggregate_stats = {}  # For aggregate statistics like length_baseline_stats
 
         # Lists to collect samples for the table
         sample_inputs = []
@@ -689,6 +690,12 @@ class RayPPOTrainer:
 
             reward_extra_infos_dict["reward"].extend(scores)
             reward_extra_info = result.get("reward_extra_info", {})
+
+            # Extract aggregate statistics (dicts that shouldn't be extended per-sample)
+            if "length_baseline_stats" in reward_extra_info:
+                aggregate_stats.update(reward_extra_info.pop("length_baseline_stats"))
+
+            # Process per-sample values
             for key, values in reward_extra_info.items():
                 if key not in reward_extra_infos_dict:
                     reward_extra_infos_dict[key] = []
@@ -745,6 +752,10 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/min"] = sample_turns.min()
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
+
+        # Add aggregate statistics (e.g., length baseline tracker stats)
+        for key, value in aggregate_stats.items():
+            metric_dict[f"val-aux/length_baseline/{key}"] = value
 
         return metric_dict
 
