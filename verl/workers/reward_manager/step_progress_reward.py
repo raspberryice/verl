@@ -295,6 +295,11 @@ class StepProgressRewardManager(AbstractRewardManager):
             "num_episodes": int(episode_boundaries.shape[1]),
         }
 
+        # Add length baseline statistics for Phase 2
+        if self.phase == 2:
+            length_stats = self.length_tracker.get_statistics()
+            extra_info["length_baseline_stats"] = length_stats
+
         if return_dict:
             return {"reward_tensor": reward_tensor, "reward_extra_info": extra_info}
         return reward_tensor
