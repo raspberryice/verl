@@ -96,6 +96,7 @@ class AdvantageEstimator(str, Enum):
 
     GAE = "gae"
     GRPO = "grpo"
+    GRPO_PROCESS_REWARD = "grpo_process_reward"
     REINFORCE_PLUS_PLUS = "reinforce_plus_plus"
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
     REMAX = "remax"
@@ -327,6 +328,97 @@ def compute_grpo_outcome_advantage(
 
     return scores, scores
 
+@register_adv_est(AdvantageEstimator.GRPO_PROCESS_REWARD)
+def compute_grpo_with_process_reward_advantage(
+    token_level_rewards: torch.Tensor,  # (bs, length)
+    response_mask: torch.Tensor,  # (bs, length)
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    config: Optional[AlgoConfig] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for GRPO with process rewards (DeepSeekMath Section 4.1.3).
+
+    This implementation preserves token-level structure by normalizing BEFORE aggregating:
+    1. For each group: Collect set R (all step rewards from all samples in the group)
+    2. Normalize each step reward by group-level mean/std
+    3. Compute advantages as cumulative sum (Monte Carlo returns)
+
+    Args:
+        token_level_rewards: `(torch.Tensor)`
+            shape is (bs, response_length) - token-level process rewards
+        response_mask: `(torch.Tensor)`
+            shape is (bs, response_length) - mask for valid steps
+        index: `(np.ndarray)`
+            shape is (bs,) - group ID for each sample (samples with same ID = same prompt)
+        epsilon: `(float)`
+            small value to avoid division by zero
+        norm_adv_by_std_in_grpo: `(bool)`
+            whether to normalize by std (if False, only subtract mean)
+        config: `(Optional[AlgoConfig])`
+            algorithm configuration object
+
+    Returns:
+        advantages: `(torch.Tensor)`
+            shape is (bs, response_length) - token-level advantages
+        returns: `(torch.Tensor)`
+            shape is (bs, response_length) - cumulative returns (same as advantages)
+
+    Reference:
+        DeepSeekMath paper, Section 4.1.3: Process Supervision RL with GRPO
+        https://arxiv.org/abs/2402.03300
+    """
+    with torch.no_grad():
+        bsz = token_level_rewards.shape[0]
+
+        # Step 1: Group samples by index and collect all rewards per group
+        # For each group: R = {all step rewards from all samples in the group}
+        id2rewards = defaultdict(list)
+        for i in range(bsz):
+            # Extract masked rewards for this sample
+            sample_rewards = token_level_rewards[i][response_mask[i].bool()]  # [num_valid_steps_i]
+            id2rewards[index[i]].append(sample_rewards)
+
+        # Step 2: Compute group-level mean/std for each group
+        id2mean = {}
+        id2std = {}
+        for idx in id2rewards:
+            # Concatenate all rewards from all samples in this group
+            group_rewards = torch.cat(id2rewards[idx])  # [total_steps_in_group]
+
+            if len(group_rewards) == 0:
+                # No valid steps in this group
+                id2mean[idx] = torch.tensor(0.0, device=token_level_rewards.device)
+                id2std[idx] = torch.tensor(1.0, device=token_level_rewards.device)
+            else:
+                id2mean[idx] = group_rewards.mean()
+                if norm_adv_by_std_in_grpo and len(group_rewards) > 1:
+                    id2std[idx] = group_rewards.std()
+                else:
+                    id2std[idx] = torch.tensor(1.0, device=token_level_rewards.device)
+
+        # Step 3: Normalize each step reward by group-level mean/std
+        # r̃_i^{index(j)} = (r_i^{index(j)} - mean(R_group)) / std(R_group)
+        rewards_normalized = torch.zeros_like(token_level_rewards)
+        for i in range(bsz):
+            group_idx = index[i]
+            rewards_normalized[i] = (token_level_rewards[i] - id2mean[group_idx]) / (id2std[group_idx] + epsilon)
+
+        # Zero out non-step tokens
+        rewards_normalized = rewards_normalized * response_mask
+
+        # Step 4: Compute advantages as cumulative sum (Monte Carlo returns with γ=1)
+        # For each token t: advantage[t] = Σ_{j≥t} r̃[j]
+        # Implementation: flip, cumsum, flip back
+        advantages = rewards_normalized.flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])  # [bs, response_length]
+        advantages = advantages * response_mask  # Ensure mask consistency
+
+        # For returns, we use the same values (no separate value function baseline)
+        returns = advantages.clone()
+
+    return advantages, returns
+    
 
 @register_adv_est(AdvantageEstimator.GRPO_VECTORIZED)
 def compute_grpo_vectorized_outcome_advantage(
