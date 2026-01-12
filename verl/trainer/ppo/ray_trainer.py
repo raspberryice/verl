@@ -644,7 +644,6 @@ class RayPPOTrainer:
     def _validate(self):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
-        aggregate_stats = {}  # For aggregate statistics like length_baseline_stats
 
         # Lists to collect samples for the table
         sample_inputs = []
@@ -728,10 +727,6 @@ class RayPPOTrainer:
             reward_extra_infos_dict["reward"].extend(scores)
             reward_extra_info = result.get("reward_extra_info", {})
 
-            # Extract aggregate statistics (dicts that shouldn't be extended per-sample)
-            if "length_baseline_stats" in reward_extra_info:
-                aggregate_stats.update(reward_extra_info.pop("length_baseline_stats"))
-
             # Process per-sample values
             for key, values in reward_extra_info.items():
                 if key not in reward_extra_infos_dict:
@@ -789,10 +784,6 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/min"] = sample_turns.min()
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
-
-        # Add aggregate statistics (e.g., length baseline tracker stats)
-        for key, value in aggregate_stats.items():
-            metric_dict[f"val-aux/length_baseline/{key}"] = value
 
         return metric_dict
 
@@ -961,7 +952,7 @@ class RayPPOTrainer:
 
         # Inject actor_forward_fn into StepProgressRewardManager if needed
         from verl.workers.reward_manager.step_progress_reward import StepProgressRewardManager
-        if isinstance(self.reward_fn, StepProgressRewardManager):
+        if isinstance(self.reward_fn, StepProgressRewardManager) or isinstance(self.val_reward_fn, StepProgressRewardManager):
             def actor_forward_fn(input_ids, attention_mask):
                 """Compute log probs for input sequences using actor model.
 
@@ -988,9 +979,13 @@ class RayPPOTrainer:
                 else:
                     return log_prob_output
 
-            # Inject the function into the reward manager
-            self.reward_fn.actor_forward_fn = actor_forward_fn
-            print("[StepProgressReward] Injected actor_forward_fn into reward manager")
+            # Inject the function into both training and validation reward managers
+            if isinstance(self.reward_fn, StepProgressRewardManager):
+                self.reward_fn.actor_forward_fn = actor_forward_fn
+                print("[StepProgressReward] Injected actor_forward_fn into training reward manager")
+            if isinstance(self.val_reward_fn, StepProgressRewardManager):
+                self.val_reward_fn.actor_forward_fn = actor_forward_fn
+                print("[StepProgressReward] Injected actor_forward_fn into validation reward manager")
 
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
@@ -1402,6 +1397,9 @@ class RayPPOTrainer:
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
 
+                # Initialize aggregate stats for this training step
+                aggregate_stats = {}
+
                 # add uid to batch
                 batch.non_tensor_batch["uid"] = np.array(
                     [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
@@ -1557,6 +1555,10 @@ class RayPPOTrainer:
                         if self.config.reward_model.launch_reward_fn_async:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor
+
+                        # Extract aggregate statistics (dicts that shouldn't be added per-sample)
+                        if reward_extra_infos_dict and "length_baseline_stats" in reward_extra_infos_dict:
+                            aggregate_stats.update(reward_extra_infos_dict.pop("length_baseline_stats"))
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
@@ -1833,6 +1835,11 @@ class RayPPOTrainer:
                 # this is experimental and may be changed/removed in the future in favor of a general-purpose one
                 if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
                     self.train_dataloader.sampler.update(batch=batch)
+
+                # Add aggregate statistics (e.g., length baseline tracker stats)
+                if aggregate_stats:
+                    for key, value in aggregate_stats.items():
+                        metrics[f"train/length_baseline/{key}"] = value
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
