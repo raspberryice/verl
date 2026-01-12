@@ -299,7 +299,11 @@ class StepProgressRewardManager(AbstractRewardManager):
         if self.phase == 2:
             length_stats = self.length_tracker.get_statistics()
             extra_info["length_baseline_stats"] = length_stats
+            print(f"[StepProgressReward] DEBUG: Phase 2 length_stats = {length_stats}")
+            print(f"[StepProgressReward] DEBUG: extra_info keys = {extra_info.keys()}")
 
         if return_dict:
+            print(f"[StepProgressReward] DEBUG: Returning dict with extra_info keys = {extra_info.keys()}")
             return {"reward_tensor": reward_tensor, "reward_extra_info": extra_info}
+        print(f"[StepProgressReward] DEBUG: Returning only reward_tensor (return_dict=False)")
         return reward_tensor
