@@ -1520,8 +1520,11 @@ class RayPPOTrainer:
                         batch.batch["token_level_scores"] = reward_tensor
 
                         # Extract aggregate statistics (dicts that shouldn't be added per-sample)
+                        print(f"[RayTrainer] DEBUG: reward_extra_infos_dict keys = {reward_extra_infos_dict.keys() if reward_extra_infos_dict else 'None'}")
                         if reward_extra_infos_dict and "length_baseline_stats" in reward_extra_infos_dict:
-                            aggregate_stats.update(reward_extra_infos_dict.pop("length_baseline_stats"))
+                            length_baseline_stats = reward_extra_infos_dict.pop("length_baseline_stats")
+                            print(f"[RayTrainer] DEBUG: Extracted length_baseline_stats = {length_baseline_stats}")
+                            aggregate_stats.update(length_baseline_stats)
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
@@ -1655,8 +1658,10 @@ class RayPPOTrainer:
 
                 # Add aggregate statistics (e.g., length baseline tracker stats)
                 if aggregate_stats:
+                    print(f"[RayTrainer] DEBUG: Adding aggregate_stats to metrics: {aggregate_stats}")
                     for key, value in aggregate_stats.items():
                         metrics[f"train/length_baseline/{key}"] = value
+                        print(f"[RayTrainer] DEBUG: Added metric train/length_baseline/{key} = {value}")
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
