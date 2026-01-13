@@ -671,10 +671,6 @@ class RayPPOTrainer:
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
 
-            # Pre-compute prefix log probs for validation (if using StepProgressRewardManager)
-            if hasattr(self, 'prefix_logprob_populator') and self.prefix_logprob_populator is not None:
-                test_output_gen_batch = self.prefix_logprob_populator.populate_cache(test_output_gen_batch)
-
             print("validation generation end")
 
             # Store generated outputs
@@ -684,8 +680,17 @@ class RayPPOTrainer:
 
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
+            test_batch.meta_info["base_reward_only"] = True
 
-            # evaluate using reward_function
+            if self.use_rm and "rm_scores" not in test_batch.batch.keys():
+                if not self.use_reward_loop:
+                    rm_scores = self.rm_wg.compute_rm_score(test_batch)
+                else:
+                    assert self.reward_loop_manager is not None, "RewardLoopManager is None"
+                    rm_scores = self.reward_loop_manager.compute_rm_score(test_batch)
+                test_batch = test_batch.union(rm_scores)
+
+            # evaluate using reward_function (base rewards only during validation)
             result = self._compute_or_extract_reward(test_batch, reward_fn=self.val_reward_fn, return_dict=True)
             reward_tensor = result["reward_tensor"]
             scores = reward_tensor.sum(-1).cpu().tolist()
@@ -917,55 +922,30 @@ class RayPPOTrainer:
         self.actor_rollout_wg = all_wg[str(actor_role)]
         self.actor_rollout_wg.init_model()
 
-        # Inject actor_forward_fn into StepProgressRewardManager if needed
+        # Initialize prefix log prob populator if we use step progress rewards
         from verl.workers.reward_manager.step_progress_reward import StepProgressRewardManager
-        if isinstance(self.reward_fn, StepProgressRewardManager) or isinstance(self.val_reward_fn, StepProgressRewardManager):
-            def actor_forward_fn(input_ids, attention_mask):
-                """Compute log probs for input sequences using actor model.
+        if isinstance(self.reward_fn, StepProgressRewardManager):
+            from verl.workers.reward_manager.prefix_logprob_populator import PrefixLogProbPopulator
 
-                IMPORTANT: Detaches outputs to prevent gradient backpropagation.
-                V(prefix) estimation is for reward computation only, not for training gradients.
-                """
-                # Use actor worker group's compute_log_prob method
+            def actor_forward_fn(input_ids, attention_mask):
                 log_prob_output = self.actor_rollout_wg.compute_log_prob(
                     input_ids=input_ids,
-                    attention_mask=attention_mask
+                    attention_mask=attention_mask,
                 )
-
-                # Detach all tensors in the output to prevent gradient flow
                 if isinstance(log_prob_output, dict):
-                    detached_output = {}
-                    for key, value in log_prob_output.items():
-                        if isinstance(value, torch.Tensor):
-                            detached_output[key] = value.detach()
-                        else:
-                            detached_output[key] = value
-                    return detached_output
-                elif isinstance(log_prob_output, torch.Tensor):
+                    return {k: (v.detach() if isinstance(v, torch.Tensor) else v) for k, v in log_prob_output.items()}
+                if isinstance(log_prob_output, torch.Tensor):
                     return log_prob_output.detach()
-                else:
-                    return log_prob_output
+                return log_prob_output
 
-            # Inject the function into both training and validation reward managers
-            if isinstance(self.reward_fn, StepProgressRewardManager):
-                self.reward_fn.actor_forward_fn = actor_forward_fn
-                print("[StepProgressReward] Injected actor_forward_fn into training reward manager")
-
-                # Initialize prefix log prob populator (REQUIRED for training to work)
-                from verl.workers.reward_manager.prefix_logprob_populator import PrefixLogProbPopulator
-
-                self.prefix_logprob_populator = PrefixLogProbPopulator(
-                    tokenizer=self.tokenizer,
-                    actor_forward_fn=actor_forward_fn,
-                    step_progress_reward_config=self.config.reward_model.reward_kwargs.get(
-                        "step_progress_reward_config", {}
-                    ),
-                )
-                print("[StepProgressReward] Initialized prefix log prob populator")
-
-            if isinstance(self.val_reward_fn, StepProgressRewardManager):
-                self.val_reward_fn.actor_forward_fn = actor_forward_fn
-                print("[StepProgressReward] Injected actor_forward_fn into validation reward manager")
+            self.prefix_logprob_populator = PrefixLogProbPopulator(
+                tokenizer=self.tokenizer,
+                actor_forward_fn=actor_forward_fn,
+                step_progress_reward_config=self.config.reward_model.reward_kwargs.get(
+                    "step_progress_reward_config", {}
+                ),
+            )
+            print("[StepProgressReward] Initialized prefix log prob populator")
 
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
@@ -1405,11 +1385,6 @@ class RayPPOTrainer:
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
 
-                        # Pre-compute prefix log probs (REQUIRED for StepProgressRewardManager)
-                        if hasattr(self, 'prefix_logprob_populator') and self.prefix_logprob_populator is not None:
-                            with marked_timer("prefix_precompute", timing_raw, color="green"):
-                                gen_batch_output = self.prefix_logprob_populator.populate_cache(gen_batch_output)
-
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         if self.reward_fn is None:
                             raise ValueError("A reward_fn is required for REMAX advantage estimation.")
@@ -1448,6 +1423,11 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+
+                    # Pre-compute prefix log probs (after union, so reward_model data is available)
+                    if hasattr(self, 'prefix_logprob_populator') and self.prefix_logprob_populator is not None:
+                        with marked_timer("prefix_precompute", timing_raw, color="green"):
+                            batch = self.prefix_logprob_populator.populate_cache(batch)
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
