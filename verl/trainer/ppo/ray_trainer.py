@@ -671,6 +671,10 @@ class RayPPOTrainer:
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
 
+            # Pre-compute prefix log probs for validation (if using StepProgressRewardManager)
+            if hasattr(self, 'prefix_logprob_populator') and self.prefix_logprob_populator is not None:
+                test_output_gen_batch = self.prefix_logprob_populator.populate_cache(test_output_gen_batch)
+
             print("validation generation end")
 
             # Store generated outputs
