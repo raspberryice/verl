@@ -983,6 +983,19 @@ class RayPPOTrainer:
             if isinstance(self.reward_fn, StepProgressRewardManager):
                 self.reward_fn.actor_forward_fn = actor_forward_fn
                 print("[StepProgressReward] Injected actor_forward_fn into training reward manager")
+
+                # Initialize prefix log prob populator (REQUIRED for training to work)
+                from verl.workers.reward_manager.prefix_logprob_populator import PrefixLogProbPopulator
+
+                self.prefix_logprob_populator = PrefixLogProbPopulator(
+                    tokenizer=self.tokenizer,
+                    actor_forward_fn=actor_forward_fn,
+                    step_progress_reward_config=self.config.reward_model.reward_kwargs.get(
+                        "step_progress_reward_config", {}
+                    ),
+                )
+                print("[StepProgressReward] Initialized prefix log prob populator")
+
             if isinstance(self.val_reward_fn, StepProgressRewardManager):
                 self.val_reward_fn.actor_forward_fn = actor_forward_fn
                 print("[StepProgressReward] Injected actor_forward_fn into validation reward manager")
@@ -1424,6 +1437,11 @@ class RayPPOTrainer:
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
+
+                        # Pre-compute prefix log probs (REQUIRED for StepProgressRewardManager)
+                        if hasattr(self, 'prefix_logprob_populator') and self.prefix_logprob_populator is not None:
+                            with marked_timer("prefix_precompute", timing_raw, color="green"):
+                                gen_batch_output = self.prefix_logprob_populator.populate_cache(gen_batch_output)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         if self.reward_fn is None:

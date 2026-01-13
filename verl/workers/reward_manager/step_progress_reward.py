@@ -126,6 +126,9 @@ class StepProgressRewardManager(AbstractRewardManager):
                 ema_alpha=config.get("length_ema_alpha", 0.1),
             )
 
+        # Enable prefix value pre-computation (REQUIRED, not optional)
+        self.enable_prefix_value_cache = config.get("enable_prefix_value_cache", True)
+
         # For printing samples
         self.num_printed = 0
 
@@ -188,18 +191,59 @@ class StepProgressRewardManager(AbstractRewardManager):
 
         return reward_tensor
 
+    def _get_precomputed_prefix_values(self, data: DataProto) -> tuple:
+        """
+        Retrieve pre-computed prefix values from batch metadata.
+
+        This is REQUIRED - training will fail if values are missing. There is no
+        fallback to recomputing on the critical path.
+
+        Expected structure in data.meta_info["prefix_value_cache"]:
+        {
+            "prefix_values": torch.Tensor [batch_size, max_episodes],
+            "episode_boundaries": torch.Tensor [batch_size, max_episodes, 2],
+            "cache_timestamp": int (for debugging)
+        }
+
+        Returns:
+            (prefix_values, episode_boundaries)
+
+        Raises:
+            RuntimeError: If pre-computed values are missing or invalid
+        """
+        if not self.enable_prefix_value_cache:
+            raise RuntimeError(
+                "[StepProgressReward] Prefix value pre-computation disabled, but reward computation requires it. "
+                "Set enable_prefix_value_cache=True in config."
+            )
+
+        cache = data.meta_info.get("prefix_value_cache", None)
+        if cache is None:
+            raise RuntimeError(
+                "[StepProgressReward] Missing prefix_value_cache in batch meta_info. "
+                "PrefixLogProbPopulator.populate_cache() must be called during generation phase."
+            )
+
+        # Validate values match current batch
+        cached_batch_size = cache["prefix_values"].shape[0]
+        current_batch_size = len(data)
+
+        if cached_batch_size != current_batch_size:
+            raise RuntimeError(
+                "[StepProgressReward] Pre-computed prefix_value tensor does not match batch size "
+                f"({cached_batch_size} vs {current_batch_size}). Generation pipeline error."
+            )
+
+        # Values are valid and ready
+        print(f"[StepProgressReward] Using pre-computed prefix values (shape: {cache['prefix_values'].shape})")
+        return cache["prefix_values"], cache["episode_boundaries"]
+
     def __call__(self, data: DataProto, return_dict: bool = False) -> torch.Tensor | dict[str, Any]:
         """
         Compute step progress rewards for a batch.
 
-        Steps:
-        1. Compute base correctness rewards (R_final)
-        2. If actor_forward_fn available:
-           a. Segment responses into episodes
-           b. Estimate V(prefix) for each episode
-           c. Compute marginal utilities U_i
-           d. Apply process reward formula (Phase 1 or 2)
-        3. Return token-level rewards
+        Requires prefix values to be pre-computed during generation phase.
+        Will raise RuntimeError if values are missing.
 
         Args:
             data: DataProto containing batch data
@@ -214,7 +258,7 @@ class StepProgressRewardManager(AbstractRewardManager):
         if reward_from_rm_scores is not None:
             return reward_from_rm_scores
 
-        # Step 1: Compute base correctness rewards
+        # Step 1: Compute base correctness rewards (keep in training phase)
         base_reward_tensor = self._compute_base_rewards(data)
 
         # If no actor_forward_fn, fall back to base rewards only
@@ -224,36 +268,10 @@ class StepProgressRewardManager(AbstractRewardManager):
                 return {"reward_tensor": base_reward_tensor}
             return base_reward_tensor
 
-        # Step 2: Segment into episodes
-        # Need to construct input_ids from prompts + responses
-        prompt_ids = data.batch["prompts"]
-        response_ids = data.batch["responses"]
-        input_ids = torch.cat([prompt_ids, response_ids], dim=1)
+        # Step 2: Retrieve pre-computed prefix values (REQUIRED - will raise if missing)
+        prefix_values, episode_boundaries = self._get_precomputed_prefix_values(data)
 
-        # Response mask
-        prompt_length = prompt_ids.shape[-1]
-        response_mask = data.batch["attention_mask"][:, prompt_length:]
-
-        episode_boundaries = self.segmenter.segment_batch(
-            input_ids=input_ids,
-            response_mask=response_mask,
-        )
-
-        # Step 3: Extract ground truths
-        ground_truths = [
-            item["ground_truth"]
-            for item in data.non_tensor_batch["reward_model"]
-        ]
-
-        # Step 4: Estimate prefix values using actor model
-        prefix_values = self.value_estimator.estimate_prefix_values_batch(
-            batch=data,
-            episode_boundaries=episode_boundaries,
-            ground_truths=ground_truths,
-            actor_model_fn=self.actor_forward_fn,
-        )
-
-        # Step 5: Compute process rewards
+        # Step 3: Compute process rewards (cheap: just math)
         if self.phase == 1:
             reward_tensor = compute_step_progress_reward_phase1(
                 batch=data,
@@ -265,8 +283,10 @@ class StepProgressRewardManager(AbstractRewardManager):
                 clip_max=self.clip_max,
             )
         else:  # phase == 2
-            # Update length baselines from this batch
+            # Step 4: Update length baselines (keep in training phase - lightweight)
+            prompt_ids = data.batch["prompts"]
             problem_ids = data.non_tensor_batch.get("problem_id", [f"sample_{i}" for i in range(len(data))])
+            response_mask = data.batch["attention_mask"][:, prompt_ids.shape[-1]:]
             response_lengths = response_mask.sum(dim=-1).tolist()
             is_correct = (base_reward_tensor.sum(dim=-1) > 0).tolist()
 
