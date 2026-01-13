@@ -57,7 +57,6 @@ class StepProgressRewardManager(AbstractRewardManager):
         num_examine: int,
         compute_score: Callable,  # Base reward function (e.g., bigmath_reward)
         reward_fn_key: str = "data_source",
-        actor_forward_fn: Optional[Callable] = None,  # For V(prefix) estimation
         step_progress_reward_config: Optional[dict] = None,
     ):
         """
@@ -68,8 +67,6 @@ class StepProgressRewardManager(AbstractRewardManager):
             num_examine: Number of samples to print for debugging
             compute_score: Base reward function for outcome correctness
             reward_fn_key: Key to use for reward function selection (default: "data_source")
-            actor_forward_fn: Function to compute log probs from actor model
-                             Signature: (input_ids, attention_mask) -> dict with "log_probs"
                              Required for process rewards, falls back to base rewards if None
             step_progress_reward_config: Configuration dict with keys:
                 - phase: 1 or 2 (default: 1)
@@ -84,7 +81,6 @@ class StepProgressRewardManager(AbstractRewardManager):
         self.num_examine = num_examine
         self.compute_score = compute_score
         self.reward_fn_key = reward_fn_key
-        self.actor_forward_fn = actor_forward_fn
 
         # Parse configuration
         config = step_progress_reward_config or {}
@@ -253,22 +249,14 @@ class StepProgressRewardManager(AbstractRewardManager):
             reward_tensor: [batch_size, seq_len] token-level rewards
             OR dict with {"reward_tensor": ..., "reward_extra_info": {...}}
         """
-        # Check if rewards already computed (from reward loop)
-        reward_from_rm_scores = self._extract_reward_from_rm_scores(data, return_dict)
-        if reward_from_rm_scores is not None:
-            return reward_from_rm_scores
-
-        # Step 1: Compute base correctness rewards (keep in training phase)
         base_reward_tensor = self._compute_base_rewards(data)
+        base_only = data.meta_info.get("base_reward_only", False)
 
-        # If no actor_forward_fn, fall back to base rewards only
-        if self.actor_forward_fn is None:
-            print("[StepProgressReward] Warning: actor_forward_fn not provided, using base rewards only")
+        if base_only:
             if return_dict:
-                return {"reward_tensor": base_reward_tensor}
+                return {"reward_tensor": base_reward_tensor, "reward_extra_info": {}}
             return base_reward_tensor
 
-        # Step 2: Retrieve pre-computed prefix values (REQUIRED - will raise if missing)
         prefix_values, episode_boundaries = self._get_precomputed_prefix_values(data)
 
         # Step 3: Compute process rewards (cheap: just math)
@@ -310,15 +298,15 @@ class StepProgressRewardManager(AbstractRewardManager):
             )
 
         # Prepare extra info for logging
+        per_sample_episode_counts = (episode_boundaries[..., 0] != -1).sum(dim=1)
         extra_info = {
             "prefix_values": prefix_values.cpu().numpy(),
-            "num_episodes": int(episode_boundaries.shape[1]),
+            "num_episodes": per_sample_episode_counts.cpu().numpy(),
         }
 
         # Add length baseline statistics for Phase 2
         if self.phase == 2:
             length_stats = self.length_tracker.get_statistics()
-            extra_info["length_baseline_stats"] = length_stats
             print(f"[StepProgressReward] DEBUG: Phase 2 length_stats = {length_stats}")
             print(f"[StepProgressReward] DEBUG: extra_info keys = {extra_info.keys()}")
 
