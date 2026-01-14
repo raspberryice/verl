@@ -54,7 +54,6 @@ class StepProgressRewardManager(AbstractRewardManager):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        num_examine: int,
         compute_score: Callable,  # Base reward function (e.g., bigmath_reward)
         reward_fn_key: str = "data_source",
         step_progress_reward_config: Optional[dict] = None,
@@ -64,7 +63,6 @@ class StepProgressRewardManager(AbstractRewardManager):
 
         Args:
             tokenizer: Tokenizer for text processing
-            num_examine: Number of samples to print for debugging
             compute_score: Base reward function for outcome correctness
             reward_fn_key: Key to use for reward function selection (default: "data_source")
                              Required for process rewards, falls back to base rewards if None
@@ -78,7 +76,6 @@ class StepProgressRewardManager(AbstractRewardManager):
                 - use_solve_gating: Whether to only penalize post-solve episodes (Phase 2, default: False)
         """
         self.tokenizer = tokenizer
-        self.num_examine = num_examine
         self.compute_score = compute_score
         self.reward_fn_key = reward_fn_key
 
@@ -125,8 +122,6 @@ class StepProgressRewardManager(AbstractRewardManager):
         # Enable prefix value pre-computation (REQUIRED, not optional)
         self.enable_prefix_value_cache = config.get("enable_prefix_value_cache", True)
 
-        # For printing samples
-        self.num_printed = 0
 
     def _compute_base_rewards(self, data: DataProto) -> torch.Tensor:
         """
@@ -178,12 +173,6 @@ class StepProgressRewardManager(AbstractRewardManager):
         # Assign rewards to last token of each response
         for i in range(len(data)):
             reward_tensor[i, valid_response_length[i].item() - 1] = scores[i]
-
-            # Print some samples for debugging
-            if self.num_printed < self.num_examine:
-                print(f"[StepProgressReward] Sample {self.num_printed}: score={scores[i]:.2f}")
-                print(f"  Response: {sequences_str[i][:200]}...")
-                self.num_printed += 1
 
         return reward_tensor
 
