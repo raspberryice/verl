@@ -64,6 +64,7 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+from verl.utils.model import compute_position_id_with_mask
 
 
 @dataclass
@@ -927,7 +928,6 @@ class RayPPOTrainer:
         if isinstance(self.reward_fn, StepProgressRewardManager):
             from verl.workers.reward_manager.prefix_logprob_populator import PrefixLogProbPopulator
 
-            from verl.utils.model import compute_position_id_with_mask
 
             def actor_forward_fn(input_ids, attention_mask, responses):
                 """
@@ -943,6 +943,11 @@ class RayPPOTrainer:
                     List[torch.Tensor] - log probs for each response, same order as input
                 """
                 log_probs: list[torch.Tensor] = [None] * input_ids.size(0)
+                size_divisor = (
+                    self.actor_rollout_wg.world_size
+                    if not self.async_rollout_mode
+                    else self.config.actor_rollout_ref.rollout.agent.num_workers
+                )
 
                 # Group by response length for efficient batching
                 length_to_indices: dict[int, list[int]] = {}
@@ -968,8 +973,11 @@ class RayPPOTrainer:
                             "attention_mask": group_attention_mask,
                             "position_ids": position_ids,
                             "responses": group_responses,
-                        }
+                        },
                     )
+
+                    # Pad to be divisible by size_divisor for distributed chunking
+                    data, pad_size = pad_dataproto_to_divisor(data, size_divisor)
                     micro_batch_size = self.config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu
                     if micro_batch_size is None:
                         micro_batch_size = self.config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu
@@ -982,6 +990,9 @@ class RayPPOTrainer:
                     data.meta_info["micro_batch_size"] = micro_batch_size
 
                     output = self.actor_rollout_wg.compute_log_prob(data)
+
+                    # Unpad the result
+                    output = unpad_dataproto(output, pad_size=pad_size)
                     group_log_probs = output.batch["old_log_probs"]
 
                     for local_idx, lp in zip(indices, group_log_probs):
