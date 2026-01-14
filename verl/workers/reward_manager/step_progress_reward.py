@@ -54,6 +54,7 @@ class StepProgressRewardManager(AbstractRewardManager):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
+        num_examine: int, 
         compute_score: Callable,  # Base reward function (e.g., bigmath_reward)
         reward_fn_key: str = "data_source",
         step_progress_reward_config: Optional[dict] = None,
