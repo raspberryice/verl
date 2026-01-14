@@ -964,16 +964,58 @@ class RayPPOTrainer:
         if isinstance(self.reward_fn, StepProgressRewardManager):
             from verl.workers.reward_manager.prefix_logprob_populator import PrefixLogProbPopulator
 
-            def actor_forward_fn(input_ids, attention_mask):
-                log_prob_output = self.actor_rollout_wg.compute_log_prob(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                )
-                if isinstance(log_prob_output, dict):
-                    return {k: (v.detach() if isinstance(v, torch.Tensor) else v) for k, v in log_prob_output.items()}
-                if isinstance(log_prob_output, torch.Tensor):
-                    return log_prob_output.detach()
-                return log_prob_output
+            from verl.utils.model import compute_position_id_with_mask
+
+            def actor_forward_fn(input_ids, attention_mask, answer_lengths):
+                seq_lengths = attention_mask.sum(dim=1).to(torch.int64)
+                log_probs: list[torch.Tensor] = [None] * input_ids.size(0)
+                length_to_indices: dict[int, list[int]] = {}
+                for idx, ans_len in enumerate(answer_lengths):
+                    length_to_indices.setdefault(ans_len, []).append(idx)
+
+                for ans_len, indices in length_to_indices.items():
+                    if ans_len == 0:
+                        zero = torch.zeros(1, device=input_ids.device)
+                        for idx in indices:
+                            log_probs[idx] = zero
+                        continue
+
+                    group_input_ids = input_ids[indices]
+                    group_attention_mask = attention_mask[indices]
+                    group_seq_lens = seq_lengths[indices]
+                    responses = []
+                    for row, seq_len in enumerate(group_seq_lens):
+                        seq_len = int(seq_len.item())
+                        responses.append(group_input_ids[row, seq_len - ans_len : seq_len])
+                    responses = torch.stack(responses)
+                    position_ids = compute_position_id_with_mask(group_attention_mask)
+
+                    data = DataProto.from_dict(
+                        tensors={
+                            "input_ids": group_input_ids,
+                            "attention_mask": group_attention_mask,
+                            "position_ids": position_ids,
+                            "responses": responses,
+                        }
+                    )
+                    micro_batch_size = self.config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu
+                    if micro_batch_size is None:
+                        micro_batch_size = self.config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu
+                    max_token_len = self.config.actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu
+                    if max_token_len is None:
+                        max_token_len = self.config.actor_rollout_ref.actor.ppo_max_token_len_per_gpu
+                    data.meta_info["use_dynamic_bsz"] = self.config.actor_rollout_ref.rollout.log_prob_use_dynamic_bsz
+                    data.meta_info["max_token_len"] = max_token_len
+                    data.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+                    data.meta_info["micro_batch_size"] = micro_batch_size
+
+                    output = self.actor_rollout_wg.compute_log_prob(data)
+                    group_log_probs = output.batch["old_log_probs"]
+
+                    for local_idx, lp in zip(indices, group_log_probs):
+                        log_probs[local_idx] = lp.detach()
+
+                return log_probs
 
             self.prefix_logprob_populator = PrefixLogProbPopulator(
                 tokenizer=self.tokenizer,
