@@ -966,15 +966,29 @@ class RayPPOTrainer:
 
             from verl.utils.model import compute_position_id_with_mask
 
-            def actor_forward_fn(input_ids, attention_mask, answer_lengths):
-                seq_lengths = attention_mask.sum(dim=1).to(torch.int64)
-                log_probs: list[torch.Tensor] = [None] * input_ids.size(0)
-                length_to_indices: dict[int, list[int]] = {}
-                for idx, ans_len in enumerate(answer_lengths):
-                    length_to_indices.setdefault(ans_len, []).append(idx)
+            def actor_forward_fn(input_ids, attention_mask, responses):
+                """
+                Compute log probabilities for given response tokens.
 
-                for ans_len, indices in length_to_indices.items():
-                    if ans_len == 0:
+                Args:
+                    input_ids: [batch_size, seq_len] - full input sequences
+                    attention_mask: [batch_size, seq_len] - attention masks
+                    responses: List[torch.Tensor] - list of 1D tensors, each containing
+                              the response tokens to compute log probs for
+
+                Returns:
+                    List[torch.Tensor] - log probs for each response, same order as input
+                """
+                log_probs: list[torch.Tensor] = [None] * input_ids.size(0)
+
+                # Group by response length for efficient batching
+                length_to_indices: dict[int, list[int]] = {}
+                for idx, resp in enumerate(responses):
+                    resp_len = resp.shape[0]
+                    length_to_indices.setdefault(resp_len, []).append(idx)
+
+                for resp_len, indices in length_to_indices.items():
+                    if resp_len == 0:
                         zero = torch.zeros(1, device=input_ids.device)
                         for idx in indices:
                             log_probs[idx] = zero
@@ -982,12 +996,7 @@ class RayPPOTrainer:
 
                     group_input_ids = input_ids[indices]
                     group_attention_mask = attention_mask[indices]
-                    group_seq_lens = seq_lengths[indices]
-                    responses = []
-                    for row, seq_len in enumerate(group_seq_lens):
-                        seq_len = int(seq_len.item())
-                        responses.append(group_input_ids[row, seq_len - ans_len : seq_len])
-                    responses = torch.stack(responses)
+                    group_responses = torch.stack([responses[idx] for idx in indices])
                     position_ids = compute_position_id_with_mask(group_attention_mask)
 
                     data = DataProto.from_dict(
@@ -995,7 +1004,7 @@ class RayPPOTrainer:
                             "input_ids": group_input_ids,
                             "attention_mask": group_attention_mask,
                             "position_ids": position_ids,
-                            "responses": responses,
+                            "responses": group_responses,
                         }
                     )
                     micro_batch_size = self.config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu

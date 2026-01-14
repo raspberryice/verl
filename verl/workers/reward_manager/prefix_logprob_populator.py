@@ -43,7 +43,8 @@ class PrefixLogProbPopulator:
         Args:
             tokenizer: Tokenizer for text processing
             actor_forward_fn: Function to compute log probs from actor model
-                             Signature: (input_ids, attention_mask) -> dict with "log_probs"
+                Signature: (input_ids, attention_mask, responses) -> List[Tensor]
+                where responses is List[Tensor] of response tokens per sequence
             step_progress_reward_config: Configuration dict (same as StepProgressRewardManager)
         """
         self.tokenizer = tokenizer
