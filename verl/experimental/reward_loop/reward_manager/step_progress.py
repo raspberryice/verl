@@ -38,9 +38,8 @@ from verl.experimental.reward_loop.reward_manager import register
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.reward_score import default_compute_score
 
-# Import from reward_functions
-from reward_functions.episode_segmenter import EpisodeSegmenter
-from reward_functions.length_baseline import LengthBaselineTracker
+# Note: reward_functions imports are done lazily in init_class() to avoid
+# import errors when the module is loaded on Ray workers before PYTHONPATH is set
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -109,6 +108,10 @@ class StepProgressRewardManager(RewardManagerBase):
         """Initialize class-level shared state."""
         if cls._class_initialized:
             return
+
+        # Lazy import reward_functions modules (may not be in PYTHONPATH at module load time)
+        from reward_functions.episode_segmenter import EpisodeSegmenter
+        from reward_functions.length_baseline import LengthBaselineTracker
 
         reward_kwargs = config.reward_model.get("reward_kwargs", {})
 
