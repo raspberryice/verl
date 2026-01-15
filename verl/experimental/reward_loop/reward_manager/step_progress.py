@@ -26,7 +26,7 @@ import asyncio
 import inspect
 import logging
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
 import numpy as np
@@ -34,12 +34,17 @@ from omegaconf import DictConfig
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from verl import DataProto
-from verl.experimental.reward_loop.reward_manager import register
+from verl.experimental.reward_loop.reward_manager.registry import register
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.reward_score import default_compute_score
 
 # Note: reward_functions imports are done lazily in init_class() to avoid
 # import errors when the module is loaded on Ray workers before PYTHONPATH is set
+
+# Type-only imports for static analysis
+if TYPE_CHECKING:
+    from reward_functions.episode_segmenter import EpisodeSegmenter
+    from reward_functions.length_baseline import LengthBaselineTracker
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
