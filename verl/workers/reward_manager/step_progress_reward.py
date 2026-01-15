@@ -261,6 +261,9 @@ class StepProgressRewardManager(AbstractRewardManager):
                 clip_max=self.clip_max,
             )
         else:  # phase == 2
+            # Reset step-level stats before processing this batch
+            self.length_tracker.reset_step_stats()
+
             # Step 4: Update length baselines (keep in training phase - lightweight)
             prompt_ids = data.batch["prompts"]
             problem_ids = data.non_tensor_batch.get("problem_id", [f"sample_{i}" for i in range(len(data))])
@@ -294,14 +297,12 @@ class StepProgressRewardManager(AbstractRewardManager):
             "num_episodes": per_sample_episode_counts.cpu().numpy(),
         }
 
-        # Add length baseline statistics for Phase 2
+        # Add length baseline statistics for Phase 2 (as aggregate stats, not per-sample)
         if self.phase == 2:
             length_stats = self.length_tracker.get_statistics()
-            print(f"[StepProgressReward] DEBUG: Phase 2 length_stats = {length_stats}")
-            print(f"[StepProgressReward] DEBUG: extra_info keys = {extra_info.keys()}")
+            # Use special key that ray_trainer.py extracts for aggregate logging
+            extra_info["length_baseline_stats"] = length_stats
 
         if return_dict:
-            print(f"[StepProgressReward] DEBUG: Returning dict with extra_info keys = {extra_info.keys()}")
             return {"reward_tensor": reward_tensor, "reward_extra_info": extra_info}
-        print(f"[StepProgressReward] DEBUG: Returning only reward_tensor (return_dict=False)")
         return reward_tensor
