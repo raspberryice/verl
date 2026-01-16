@@ -64,8 +64,8 @@ class StepProgressRewardManager(RewardManagerBase):
     """
 
     # Class-level shared state
-    _length_tracker: Optional[LengthBaselineTracker] = None
-    _segmenter: Optional[EpisodeSegmenter] = None
+    _length_tracker: Optional["LengthBaselineTracker"] = None
+    _segmenter: Optional["EpisodeSegmenter"] = None
 
     def __init__(
         self,
@@ -98,6 +98,9 @@ class StepProgressRewardManager(RewardManagerBase):
         self.force_answer_prompt = self.reward_kwargs.get(
             "force_answer_prompt",
             "I need to stop thinking. I think the final answer is \\boxed{"
+        )
+        # Batch size for vLLM requests (to avoid OOM with many long episodes)
+        self.vllm_batch_size = self.reward_kwargs.get("vllm_batch_size", 4
         )
         self.ground_truth_max_tokens = self.reward_kwargs.get("ground_truth_max_tokens", 32)
         self.value_computation = self.reward_kwargs.get("value_computation", "log_mean")
@@ -299,24 +302,34 @@ class StepProgressRewardManager(RewardManagerBase):
             full_prompt = self.reward_model_tokenizer.decode(full_tokens, skip_special_tokens=False)
             prompts.append(full_prompt)
 
-        # Single batched request to vLLM
-        payload = {
-            "model": self.model_name,
-            "prompt": prompts,
-            "max_tokens": 0,
-            "prompt_logprobs": 1,
-            "temperature": 1.0,
-        }
+        # Process prompts in batches to avoid OOM on vLLM server
+        all_choices: List[dict] = []
+        batch_size = self.vllm_batch_size
 
-        try:
-            response = await self._post_request(payload, "v1/completions")
-        except Exception as e:
-            logger.warning(f"vLLM request failed: {e}. Returning zero prefix values.")
-            return [0.0] * len(episodes)
+        for batch_start in range(0, len(prompts), batch_size):
+            batch_end = min(batch_start + batch_size, len(prompts))
+            batch_prompts = prompts[batch_start:batch_end]
+
+            payload = {
+                "model": self.model_name,
+                "prompt": batch_prompts,
+                "max_tokens": 1,  # Must be >= 1 for vLLM OpenAI-compatible API
+                "prompt_logprobs": 1,
+                "temperature": 1.0,
+            }
+
+            try:
+                response = await self._post_request(payload, "v1/completions")
+                batch_choices = response.get("choices", [])
+                all_choices.extend(batch_choices)
+            except Exception as e:
+                logger.warning(f"vLLM batch request failed: {e}. Using zeros for batch {batch_start}:{batch_end}.")
+                # Add empty choices for failed batch
+                all_choices.extend([{}] * len(batch_prompts))
 
         # Extract and aggregate prefix values
         values: List[float] = []
-        choices = response.get("choices", [])
+        choices = all_choices
 
         for choice in choices:
             prompt_logprobs = choice.get("prompt_logprobs", [])
