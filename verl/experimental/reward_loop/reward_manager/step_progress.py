@@ -344,15 +344,32 @@ class StepProgressRewardManager(RewardManagerBase):
                 if abs(pos) <= len(prompt_logprobs):
                     logprob_entry = prompt_logprobs[pos]
                     if logprob_entry and isinstance(logprob_entry, dict):
-                        # vLLM returns {token_id: logprob} or {token_str: logprob}
-                        # Try token_id first, then string representation
-                        if token_id in logprob_entry:
-                            gt_logprobs.append(logprob_entry[token_id])
-                        elif str(token_id) in logprob_entry:
-                            gt_logprobs.append(logprob_entry[str(token_id)])
-                        else:
-                            # Find the logprob for this position (top logprob)
-                            gt_logprobs.append(-10.0)  # Low probability fallback
+                        # vLLM OpenAI-compatible API returns:
+                        # {token_str: {"logprob": float, "bytes": [...]}, ...}
+                        # We need to find the logprob for our target token
+                        token_str = self.reward_model_tokenizer.decode([token_id])
+                        logprob_value: Optional[float] = None
+
+                        # Try exact token string match first
+                        if token_str in logprob_entry:
+                            entry = logprob_entry[token_str]
+                            if isinstance(entry, dict) and "logprob" in entry:
+                                logprob_value = entry["logprob"]
+                            elif isinstance(entry, (int, float)):
+                                logprob_value = float(entry)
+
+                        # If not found, try to find any matching entry
+                        if logprob_value is None:
+                            for key, entry in logprob_entry.items():
+                                if isinstance(entry, dict) and "logprob" in entry:
+                                    # Use the top logprob (first entry) as fallback
+                                    logprob_value = entry["logprob"]
+                                    break
+                                elif isinstance(entry, (int, float)):
+                                    logprob_value = float(entry)
+                                    break
+
+                        gt_logprobs.append(logprob_value if logprob_value is not None else -10.0)
                     else:
                         gt_logprobs.append(-10.0)
                 else:
@@ -387,6 +404,14 @@ class StepProgressRewardManager(RewardManagerBase):
         else:
             return float(np.mean(logprobs_arr))
 
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create a reusable aiohttp session."""
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=120)
+            connector = aiohttp.TCPConnector(limit=100, limit_per_host=50)
+            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+        return self._session
+
     async def _post_request(self, payload: dict, endpoint: str, max_retries: int = 8) -> dict:
         """POST request to vLLM server with retry logic."""
         if self.reward_router_address is None:
@@ -394,14 +419,23 @@ class StepProgressRewardManager(RewardManagerBase):
 
         url = f"http://{self.reward_router_address}/{endpoint}"
         last_exception: Optional[Exception] = None
+        session = await self._get_session()
 
         for attempt in range(max_retries):
             try:
-                timeout = aiohttp.ClientTimeout(total=120)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.post(url, json=payload) as resp:
-                        resp.raise_for_status()
-                        return await resp.json()
+                async with session.post(url, json=payload) as resp:
+                    resp.raise_for_status()
+                    return await resp.json()
+            except aiohttp.ClientResponseError as e:
+                # Don't retry on 4xx client errors
+                if 400 <= e.status < 500:
+                    logger.error(f"vLLM request failed with client error HTTP {e.status}: {e}. Not retrying.")
+                    raise
+                last_exception = e
+                if attempt < max_retries - 1:
+                    wait_time = min(2 ** attempt, 30)
+                    logger.debug(f"vLLM request failed (attempt {attempt + 1}): {e}. Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
             except Exception as e:
                 last_exception = e
                 if attempt < max_retries - 1:
