@@ -29,14 +29,8 @@ if TYPE_CHECKING:
     from omegaconf import DictConfig
 
     from verl import DataProto
-    from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
     from verl.trainer.config.config import ModuleConfig, RewardManagerConfig
     from verl.workers.reward_manager.abstract import AbstractRewardManager, RawRewardFn
-else:
-    try:
-        from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
-    except ImportError:
-        RewardManagerBase = None  # type: ignore[assignment,misc]
 
 
 def _call_with_kwargs(raw_fn, extra_kwargs, *args, **kwargs):
@@ -117,11 +111,12 @@ def load_reward_manager(
     compute_score = get_custom_reward_fn(config)
     final_compute_score = compute_score
 
+    # Check if we should use the reward loop registry
+    use_reward_loop = config.reward_model.get("use_reward_loop", False)
+
     reward_manager_cfg: RewardManagerConfig = config.reward_manager
     reward_manager_cls: type[AbstractRewardManager]
     if reward_manager_cfg.source == "register":
-        # Check if we should use the reward loop registry
-        use_reward_loop = config.reward_model.get("use_reward_loop", False)
         if use_reward_loop:
             from verl.experimental.reward_loop.reward_manager import get_reward_manager_cls
         else:
@@ -159,15 +154,14 @@ def load_reward_manager(
             final_compute_score = default_compute_score
 
     # Instantiate and return the reward manager with the specified parameters
-    # RewardManagerBase subclasses (like RateLimitedRewardLoopManager) don't accept num_examine
-    # while AbstractRewardManager subclasses (like NaiveRewardManager) do
-    if RewardManagerBase is not None and issubclass(reward_manager_cls, RewardManagerBase):
+    # RewardManagerBase subclasses (reward loop) don't accept num_examine or reward_kwargs
+    # as constructor args - they read reward_kwargs from config.reward_model.reward_kwargs internally
+    if use_reward_loop:
         # RewardManagerBase-based managers use a different signature
         return reward_manager_cls(
             config=config,
             tokenizer=tokenizer,
             compute_score=final_compute_score,
-            **reward_kwargs,
         )
     else:
         # Traditional AbstractRewardManager-based managers
