@@ -100,8 +100,9 @@ class StepProgressRewardManager(RewardManagerBase):
             "I need to stop thinking. I think the final answer is \\boxed{"
         )
         # Batch size for vLLM requests (to avoid OOM with many long episodes)
-        self.vllm_batch_size = self.reward_kwargs.get("vllm_batch_size", 4
-        )
+        self.vllm_batch_size = self.reward_kwargs.get("vllm_batch_size", 4)
+        # Timeout for vLLM requests (seconds) - needs to be large for 16k+ token prompts
+        self.vllm_timeout = self.reward_kwargs.get("vllm_timeout", 600)  # 10 minutes default
         self.ground_truth_max_tokens = self.reward_kwargs.get("ground_truth_max_tokens", 32)
         self.value_computation = self.reward_kwargs.get("value_computation", "log_mean")
 
@@ -110,6 +111,7 @@ class StepProgressRewardManager(RewardManagerBase):
 
         # HTTP session for async requests
         self._session: Optional[aiohttp.ClientSession] = None
+        self._session_timeout: Optional[int] = None  # Track timeout to recreate session if changed
 
     @classmethod
     def init_class(cls, config: DictConfig, tokenizer: AutoTokenizer):
@@ -406,10 +408,15 @@ class StepProgressRewardManager(RewardManagerBase):
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create a reusable aiohttp session."""
-        if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=120)
+        # Recreate session if timeout changed or session is closed
+        if (self._session is None or self._session.closed or
+                self._session_timeout != self.vllm_timeout):
+            if self._session is not None and not self._session.closed:
+                await self._session.close()
+            timeout = aiohttp.ClientTimeout(total=self.vllm_timeout)
             connector = aiohttp.TCPConnector(limit=100, limit_per_host=50)
             self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+            self._session_timeout = self.vllm_timeout
         return self._session
 
     async def _post_request(self, payload: dict, endpoint: str, max_retries: int = 8) -> dict:
