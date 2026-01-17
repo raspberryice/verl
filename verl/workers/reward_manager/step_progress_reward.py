@@ -251,7 +251,7 @@ class StepProgressRewardManager(AbstractRewardManager):
 
         # Step 3: Compute process rewards (cheap: just math)
         if self.phase == 1:
-            reward_tensor = compute_step_progress_reward_phase1(
+            reward_tensor, utility_stats = compute_step_progress_reward_phase1(
                 batch=data,
                 base_reward_tensor=base_reward_tensor,
                 prefix_values=prefix_values,
@@ -277,7 +277,7 @@ class StepProgressRewardManager(AbstractRewardManager):
                 is_correct=is_correct,
             )
 
-            reward_tensor = compute_step_progress_reward_phase2(
+            reward_tensor, utility_stats = compute_step_progress_reward_phase2(
                 batch=data,
                 base_reward_tensor=base_reward_tensor,
                 prefix_values=prefix_values,
@@ -288,6 +288,8 @@ class StepProgressRewardManager(AbstractRewardManager):
                 waste_threshold=self.waste_threshold,
                 use_solve_gating=self.use_solve_gating,
                 solve_threshold=self.solve_threshold,
+                clip_min=self.clip_min,
+                clip_max=self.clip_max,
             )
 
         # Prepare extra info for logging
@@ -296,6 +298,9 @@ class StepProgressRewardManager(AbstractRewardManager):
             "prefix_values": prefix_values.cpu().numpy(),
             "num_episodes": per_sample_episode_counts.cpu().numpy(),
         }
+
+        # Add utility statistics for monitoring (aggregate stats for this batch)
+        extra_info["utility_stats"] = utility_stats
 
         # Add length baseline statistics for Phase 2 (as aggregate stats, not per-sample)
         if self.phase == 2:
