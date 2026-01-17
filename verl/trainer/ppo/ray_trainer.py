@@ -1590,6 +1590,12 @@ class RayPPOTrainer:
                             print(f"[RayTrainer] DEBUG: Extracted length_baseline_stats = {length_baseline_stats}")
                             aggregate_stats.update(length_baseline_stats)
 
+                        # Extract utility statistics (aggregate, not per-sample)
+                        if reward_extra_infos_dict and "utility_stats" in reward_extra_infos_dict:
+                            utility_stats = reward_extra_infos_dict.pop("utility_stats")
+                            print(f"[RayTrainer] DEBUG: Extracted utility_stats = {utility_stats}")
+                            aggregate_stats.update({f"utility/{k}": v for k, v in utility_stats.items()})
+
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
