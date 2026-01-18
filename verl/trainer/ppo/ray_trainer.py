@@ -1621,17 +1621,20 @@ class RayPPOTrainer:
                         batch.batch["token_level_scores"] = reward_tensor
 
                         # Extract aggregate statistics (dicts that shouldn't be added per-sample)
-                        print(f"[RayTrainer] DEBUG: reward_extra_infos_dict keys = {reward_extra_infos_dict.keys() if reward_extra_infos_dict else 'None'}")
-                        if reward_extra_infos_dict and "length_baseline_stats" in reward_extra_infos_dict:
-                            length_baseline_stats = reward_extra_infos_dict.pop("length_baseline_stats")
-                            print(f"[RayTrainer] DEBUG: Extracted length_baseline_stats = {length_baseline_stats}")
-                            aggregate_stats.update(length_baseline_stats)
-
-                        # Extract utility statistics (aggregate, not per-sample)
-                        if reward_extra_infos_dict and "utility_stats" in reward_extra_infos_dict:
-                            utility_stats = reward_extra_infos_dict.pop("utility_stats")
-                            print(f"[RayTrainer] DEBUG: Extracted utility_stats = {utility_stats}")
-                            aggregate_stats.update({f"utility/{k}": v for k, v in utility_stats.items()})
+                        # These are batch-level stats from reward computation, not per-sample data
+                        aggregate_stat_keys = [
+                            ("length_baseline_stats", None),  # No prefix - already namespaced
+                            ("anchor_baseline_stats", "anchor"),
+                            ("utility_stats", "utility"),
+                        ]
+                        if reward_extra_infos_dict:
+                            for stat_key, prefix in aggregate_stat_keys:
+                                if stat_key in reward_extra_infos_dict:
+                                    stats = reward_extra_infos_dict.pop(stat_key)
+                                    if prefix:
+                                        aggregate_stats.update({f"{prefix}/{k}": v for k, v in stats.items()})
+                                    else:
+                                        aggregate_stats.update(stats)
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
