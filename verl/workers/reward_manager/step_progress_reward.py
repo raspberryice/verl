@@ -42,18 +42,19 @@ class StepProgressRewardManager(AbstractRewardManager):
     Reward manager for step progress rewards (overthinking mitigation).
 
     Computes rewards as:
-        Phase 1: R = R_final + λ * Σ_i clip(U_i)
-        Phase 2: R = R_final + λ * Σ_i U_i - Σ_i c_i (quantile-based length baseline)
-        Anchor:  R = R_final + λ * Σ_i U_i - Σ_i c_i (pass-rate anchor baseline)
+        Phase 1: R = R_final + λ * Σ_i clip(U_i)  (marginal utility rewards)
+        Phase 2: R = R_final - Σ_i c_i  (utility-attributed length penalties, quantile baseline)
+        Anchor:  R = R_final - Σ_i c_i  (utility-attributed length penalties, anchor baseline)
 
     where:
         U_i = V(prefix_i) - V(prefix_{i-1})  (marginal utility)
         V(prefix) = P(correct | stop at prefix and answer)
+        c_i = length penalty attributed to episode i based on its waste score
 
     Length baseline approaches:
-        - Phase 2: Uses 60% quantile of correct response lengths (LengthBaselineTracker)
-        - Anchor: Uses average length when pass rate >= 80%, continuously updated
-                  while pass rate stays above threshold (AnchorLengthTracker)
+        - Phase 2: Uses quantile of correct response lengths (LengthBaselineTracker)
+        - Anchor: Uses quantile of correct response lengths, set ONCE per problem
+                  and locked (not updated after being set)
 
     This encourages the model to make consistent progress and avoid
     redundant verification loops after already solving the problem.
@@ -77,21 +78,24 @@ class StepProgressRewardManager(AbstractRewardManager):
                              Required for process rewards, falls back to base rewards if None
             step_progress_reward_config: Configuration dict with keys:
                 - phase: 1, 2, or "anchor" (default: 1)
+                - discourse_markers: List of markers for episode segmentation
+
+                Phase 1 specific (marginal utility rewards):
                 - lambda: Weight for process rewards (default: 0.1)
                 - clip_min, clip_max: Clipping bounds for utilities (default: -0.5, 0.5)
-                - discourse_markers: List of markers for episode segmentation
-                - beta_length: Weight for length penalty (Phase 2/Anchor, default: 0.01)
-                - waste_threshold: Threshold for wasteful episodes (Phase 2/Anchor, default: 0.0)
+
+                Phase 2/Anchor specific (length penalty attribution):
+                - beta_length: Weight for length penalty (default: 0.01)
+                - waste_threshold: Threshold for wasteful episodes (default: 0.0)
                 - use_solve_gating: Whether to only penalize post-solve episodes (default: False)
 
                 Phase 2 specific (quantile-based baseline):
                 - length_quantile: Quantile for baseline (default: 0.6)
                 - length_ema_alpha: EMA smoothing factor (default: 0.1)
 
-                Anchor specific (pass-rate-based baseline):
-                - anchor_pass_threshold: Pass rate to set/update anchor (default: 0.8)
-                - anchor_window_size: Sliding window size (default: 32)
-                - anchor_min_samples: Min samples before setting anchor (default: 16)
+                Anchor specific (one-time quantile-based baseline):
+                - anchor_quantile: Quantile of correct lengths for anchor (default: 0.6)
+                - anchor_min_correct_samples: Min correct samples to set anchor (default: 8)
         """
         self.tokenizer = tokenizer
         self.compute_score = compute_score
@@ -100,13 +104,13 @@ class StepProgressRewardManager(AbstractRewardManager):
         # Parse configuration
         config = step_progress_reward_config or {}
         self.phase = config.get("phase", 1)  # 1, 2, or "anchor"
-        self.lambda_process = config.get("lambda", 0.1)
 
-        # Common parameters
+        # Phase 1 specific parameters (marginal utility rewards)
+        self.lambda_process = config.get("lambda", 0.1)
         self.clip_min = config.get("clip_min", -0.5)
         self.clip_max = config.get("clip_max", 0.5)
 
-        # Length penalty parameters (Phase 2 and Anchor)
+        # Phase 2/Anchor specific parameters (length penalty attribution)
         self.beta_length = config.get("beta_length", 0.01)
         self.waste_threshold = config.get("waste_threshold", 0.0)
         self.use_solve_gating = config.get("use_solve_gating", False)
@@ -138,9 +142,8 @@ class StepProgressRewardManager(AbstractRewardManager):
             )
         elif self.phase == "anchor":
             self.anchor_tracker = AnchorLengthTracker(
-                pass_threshold=config.get("anchor_pass_threshold", 0.8),
-                window_size=config.get("anchor_window_size", 32),
-                min_samples=config.get("anchor_min_samples", 16),
+                quantile=config.get("anchor_quantile", 0.6),
+                min_correct_samples=config.get("anchor_min_correct_samples", 8),
                 min_anchor=config.get("anchor_min_length", 256.0),
                 lenient_fallback=config.get("anchor_lenient_fallback", 16384.0),
             )
@@ -308,19 +311,16 @@ class StepProgressRewardManager(AbstractRewardManager):
                 prefix_values=prefix_values,
                 episode_boundaries=episode_boundaries,
                 length_baseline_tracker=self.length_tracker,
-                lambda_process=self.lambda_process,
                 beta_length=self.beta_length,
                 waste_threshold=self.waste_threshold,
                 use_solve_gating=self.use_solve_gating,
                 solve_threshold=self.solve_threshold,
-                clip_min=self.clip_min,
-                clip_max=self.clip_max,
             )
         elif self.phase == "anchor":
             # Reset step-level stats before processing this batch
             self.anchor_tracker.reset_step_stats()
 
-            # Update anchor baselines (tracks both correct and incorrect for pass rate)
+            # Update anchor baselines (only tracks correct responses for quantile computation)
             prompt_ids = data.batch["prompts"]
             problem_ids = data.non_tensor_batch.get("problem_id", [f"sample_{i}" for i in range(len(data))])
             response_mask = data.batch["attention_mask"][:, prompt_ids.shape[-1]:]
@@ -339,13 +339,10 @@ class StepProgressRewardManager(AbstractRewardManager):
                 prefix_values=prefix_values,
                 episode_boundaries=episode_boundaries,
                 anchor_tracker=self.anchor_tracker,
-                lambda_process=self.lambda_process,
                 beta_length=self.beta_length,
                 waste_threshold=self.waste_threshold,
                 use_solve_gating=self.use_solve_gating,
                 solve_threshold=self.solve_threshold,
-                clip_min=self.clip_min,
-                clip_max=self.clip_max,
             )
         else:
             raise ValueError(f"Unknown phase: {self.phase}. Must be 1, 2, or 'anchor'.")
