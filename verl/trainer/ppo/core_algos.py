@@ -371,42 +371,83 @@ def compute_grpo_with_process_reward_advantage(
     """
     with torch.no_grad():
         bsz = token_level_rewards.shape[0]
+        seq_len = token_level_rewards.shape[1]
 
-        # Step 1: Group samples by index and collect all rewards per group
-        # For each group: R = {all step rewards from all samples in the group}
-        id2rewards = defaultdict(list)
+        # Find last valid token position for each sample (where outcome reward is placed)
+        # response_mask is 1 for valid response tokens, 0 otherwise
+        valid_lengths = response_mask.sum(dim=-1).long()  # [bsz]
+        last_token_indices = (valid_lengths - 1).clamp(min=0)  # [bsz]
+
+        # Create mask for outcome reward positions (last valid token of each response)
+        outcome_mask = torch.zeros_like(token_level_rewards, dtype=torch.bool)
         for i in range(bsz):
-            # Extract masked rewards for this sample
-            sample_rewards = token_level_rewards[i][response_mask[i].bool()]  # [num_valid_steps_i]
-            id2rewards[index[i]].append(sample_rewards)
+            if valid_lengths[i] > 0:
+                outcome_mask[i, last_token_indices[i]] = True
 
-        # Step 2: Compute group-level mean/std for each group
-        id2mean = {}
-        id2std = {}
-        for idx in id2rewards:
-            # Concatenate all rewards from all samples in this group
-            group_rewards = torch.cat(id2rewards[idx])  # [total_steps_in_group]
+        # Create mask for process reward positions (non-zero rewards NOT at last token)
+        nonzero_mask = (token_level_rewards != 0) & response_mask.bool()
+        process_mask = nonzero_mask & ~outcome_mask
 
-            if len(group_rewards) == 0:
-                # No valid steps in this group
-                id2mean[idx] = torch.tensor(0.0, device=token_level_rewards.device)
-                id2std[idx] = torch.tensor(1.0, device=token_level_rewards.device)
-            else:
-                id2mean[idx] = group_rewards.mean()
-                if norm_adv_by_std_in_grpo and len(group_rewards) > 1:
-                    id2std[idx] = group_rewards.std()
+        # Step 1: Collect outcome rewards and process rewards separately per group
+        id2outcome = defaultdict(list)
+        id2process = defaultdict(list)
+        for i in range(bsz):
+            group_idx = index[i]
+            # Outcome reward at last token
+            if outcome_mask[i].any():
+                outcome_reward = token_level_rewards[i][outcome_mask[i]]
+                id2outcome[group_idx].append(outcome_reward)
+            # Process rewards at episode boundaries (excluding last token)
+            if process_mask[i].any():
+                process_rewards = token_level_rewards[i][process_mask[i]]
+                id2process[group_idx].append(process_rewards)
+
+        # Step 2: Compute separate mean/std for outcome and process rewards per group
+        id2outcome_mean = {}
+        id2outcome_std = {}
+        id2process_mean = {}
+        id2process_std = {}
+        unique_indices = set(index.tolist())
+
+        for idx in unique_indices:
+            # Outcome reward statistics (like standard GRPO)
+            if idx in id2outcome and len(id2outcome[idx]) > 0:
+                outcome_rewards = torch.cat(id2outcome[idx])
+                id2outcome_mean[idx] = outcome_rewards.mean()
+                if norm_adv_by_std_in_grpo and len(outcome_rewards) > 1:
+                    id2outcome_std[idx] = outcome_rewards.std()
                 else:
-                    id2std[idx] = torch.tensor(1.0, device=token_level_rewards.device)
+                    id2outcome_std[idx] = torch.tensor(1.0, device=token_level_rewards.device)
+            else:
+                id2outcome_mean[idx] = torch.tensor(0.0, device=token_level_rewards.device)
+                id2outcome_std[idx] = torch.tensor(1.0, device=token_level_rewards.device)
 
-        # Step 3: Normalize each step reward by group-level mean/std
-        # r̃_i^{index(j)} = (r_i^{index(j)} - mean(R_group)) / std(R_group)
+            # Process reward statistics (normalized separately)
+            if idx in id2process and len(id2process[idx]) > 0:
+                process_rewards = torch.cat(id2process[idx])
+                id2process_mean[idx] = process_rewards.mean()
+                if norm_adv_by_std_in_grpo and len(process_rewards) > 1:
+                    id2process_std[idx] = process_rewards.std()
+                else:
+                    id2process_std[idx] = torch.tensor(1.0, device=token_level_rewards.device)
+            else:
+                id2process_mean[idx] = torch.tensor(0.0, device=token_level_rewards.device)
+                id2process_std[idx] = torch.tensor(1.0, device=token_level_rewards.device)
+
+        # Step 3: Normalize outcome and process rewards separately
         rewards_normalized = torch.zeros_like(token_level_rewards)
         for i in range(bsz):
             group_idx = index[i]
-            rewards_normalized[i] = (token_level_rewards[i] - id2mean[group_idx]) / (id2std[group_idx] + epsilon)
-
-        # Zero out non-step tokens
-        rewards_normalized = rewards_normalized * response_mask
+            # Normalize outcome reward
+            if outcome_mask[i].any():
+                rewards_normalized[i][outcome_mask[i]] = (
+                    token_level_rewards[i][outcome_mask[i]] - id2outcome_mean[group_idx]
+                ) / (id2outcome_std[group_idx] + epsilon)
+            # Normalize process rewards
+            if process_mask[i].any():
+                rewards_normalized[i][process_mask[i]] = (
+                    token_level_rewards[i][process_mask[i]] - id2process_mean[group_idx]
+                ) / (id2process_std[group_idx] + epsilon)
 
         # Step 4: Compute advantages as cumulative sum (Monte Carlo returns with γ=1)
         # For each token t: advantage[t] = Σ_{j≥t} r̃[j]
