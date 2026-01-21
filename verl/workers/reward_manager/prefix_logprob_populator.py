@@ -97,7 +97,13 @@ class PrefixLogProbPopulator:
         input_ids = torch.cat([prompt_ids, response_ids], dim=1)
 
         prompt_length = prompt_ids.shape[-1]
-        response_mask = batch.batch["attention_mask"][:, prompt_length:]
+
+        # Build response_mask that matches input_ids shape
+        # segment_response expects response_mask to have same shape as input_ids
+        # with 1s marking valid response tokens (not prompt tokens)
+        attention_mask = batch.batch["attention_mask"]
+        response_mask = torch.zeros_like(input_ids, dtype=attention_mask.dtype)
+        response_mask[:, prompt_length:] = attention_mask[:, prompt_length:]
 
         episode_boundaries = self.segmenter.segment_batch(
             input_ids=input_ids,
