@@ -449,6 +449,24 @@ def compute_grpo_with_process_reward_advantage(
                     token_level_rewards[i][process_mask[i]] - id2process_mean[group_idx]
                 ) / (id2process_std[group_idx] + epsilon)
 
+        # Log normalized reward magnitudes for debugging
+        normalized_outcome = rewards_normalized[outcome_mask]
+        normalized_process = rewards_normalized[process_mask]
+        raw_outcome = token_level_rewards[outcome_mask]
+        raw_process = token_level_rewards[process_mask]
+
+        if len(normalized_outcome) > 0 and len(normalized_process) > 0:
+            print(f"[GRPO Process Reward] Raw outcome: mean={raw_outcome.mean():.4f}, std={raw_outcome.std():.4f}, "
+                  f"min={raw_outcome.min():.4f}, max={raw_outcome.max():.4f}")
+            print(f"[GRPO Process Reward] Raw process: mean={raw_process.mean():.4f}, std={raw_process.std():.4f}, "
+                  f"min={raw_process.min():.4f}, max={raw_process.max():.4f}")
+            print(f"[GRPO Process Reward] Normalized outcome: mean={normalized_outcome.mean():.4f}, std={normalized_outcome.std():.4f}, "
+                  f"abs_mean={normalized_outcome.abs().mean():.4f}")
+            print(f"[GRPO Process Reward] Normalized process: mean={normalized_process.mean():.4f}, std={normalized_process.std():.4f}, "
+                  f"abs_mean={normalized_process.abs().mean():.4f}")
+            print(f"[GRPO Process Reward] Count: outcome={len(normalized_outcome)}, process={len(normalized_process)}, "
+                  f"ratio={len(normalized_process)/len(normalized_outcome):.2f}x")
+
         # Step 4: Compute advantages as cumulative sum (Monte Carlo returns with γ=1)
         # For each token t: advantage[t] = Σ_{j≥t} r̃[j]
         # Implementation: flip, cumsum, flip back
