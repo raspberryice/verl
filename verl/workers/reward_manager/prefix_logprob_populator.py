@@ -68,7 +68,7 @@ class PrefixLogProbPopulator:
                 "I need to stop thinking. I think the final answer is \\boxed{"
             ),
             ground_truth_max_tokens=config.get("ground_truth_max_tokens", 32),
-            value_computation=config.get("value_computation", "geometric_mean"),
+            value_computation=config.get("value_computation", "log_mean"),
         )
 
     def populate_cache(self, batch: DataProto) -> DataProto:
